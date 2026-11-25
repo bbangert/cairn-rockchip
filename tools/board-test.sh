@@ -49,7 +49,8 @@ if [ -n "$core" ]; then
   # Exported absolute: mix.exs joins it to libs/cairn_stage from this project.
   export CAIRN_CORE_PATH=$core
   head=$(git -C "$core" rev-parse HEAD 2>/dev/null || true)
-  [ "$head" = "$core_ref" ] || say "note: $core is at ${head:-?}, CORE_REF is $core_ref"
+  want=$(git -C "$core" rev-parse --verify -q "$core_ref^{commit}" 2>/dev/null || true)
+  [ -n "$head" ] && [ "$head" = "$want" ] || say "note: $core is at ${head:-?}, CORE_REF is $core_ref"
 fi
 
 if [ -n "$rel" ]; then

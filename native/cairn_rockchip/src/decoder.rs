@@ -451,7 +451,9 @@ static RGA: OnceLock<std::result::Result<Rga, String>> = OnceLock::new();
 /// MPP thread;
 /// `setenv` races only native `getenv` callers, since the BEAM's `os:getenv`
 /// reads its own copy. A failure is kept for `open_decoder` to report: the
-/// engine NIFs in this library do not need librga.
+/// engine NIFs in this library do not need librga. A host without `/dev/rga`
+/// is such a failure: `Rga::open` refuses it before librga, which would
+/// crash the VM, is loaded.
 pub(crate) fn load(_: Env<'_>, _: Term<'_>) -> bool {
     let _ = rga();
     true

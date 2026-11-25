@@ -1,0 +1,147 @@
+name: Nightly (core main)
+
+# Advisory: the board against core's `main` tip instead of CORE_REF, so a
+# core change that breaks the board shows before core tags it. Nothing needs
+# this workflow and no branch protection should name it; a red run is a
+# heads-up for the next CORE_REF bump.
+#
+# Core's release is built from that checkout with mix, as ci.yml's board job
+# builds it at CORE_REF, and the board is built and booted against it with
+# `cairn_stage`, the Cargo crates and the shared Hex versions all taken from
+# the checkout. Nothing it writes is committed.
+#
+# GitHub disables a scheduled workflow after 60 days without activity in
+# the repository; re-enable it from the Actions tab.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  toolchain:
+    name: Core main's toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.core.outputs.sha }}
+      image: ${{ steps.core.outputs.image }}
+    # mise.toml is CORE_REF's toolchain; a difference from main's is the
+    # bump's to make, so it warns here rather than fails.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: core
+        run: |
+          sha=$(git ls-remote https://github.com/bbangert/cairn-nvr.git refs/heads/main | cut -f1)
+          curl -fsSL -o "$RUNNER_TEMP/Dockerfile" \
+            "https://raw.githubusercontent.com/bbangert/cairn-nvr/$sha/Dockerfile"
+          arg() { sed -n "s/^ARG $1=//p" "$RUNNER_TEMP/Dockerfile"; }
+          otp=$(arg OTP_VERSION) elixir=$(arg ELIXIR_VERSION) debian=$(arg DEBIAN_TAG)
+          grep -qx "erlang = \"$otp\"" mise.toml && grep -qx "elixir = \"$elixir-otp-${otp%%.*}\"" mise.toml ||
+            echo "::warning file=mise.toml::core main ($sha) builds on OTP $otp, Elixir $elixir"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "image=hexpm/elixir:$elixir-erlang-$otp-debian-$debian" >>"$GITHUB_OUTPUT"
+
+  board:
+    name: Board built and booted on core main
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: ${{ needs.toolchain.outputs.image }}
+    env:
+      FFMPEG_PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig
+      RUSTFLAGS: ""
+      CARGO_TERM_COLOR: always
+      LC_ALL: C.UTF-8
+    steps:
+      # ci.yml's board job's list.
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential git pkg-config libssl-dev clang libclang-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libpostproc-dev libswresample-dev libswscale-dev \
+            curl ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          path: cairn-rockchip
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: bbangert/cairn-nvr
+          ref: ${{ needs.toolchain.outputs.sha }}
+          path: cairn-nvr
+          persist-credentials: false
+
+      - name: Install Rust and Mix's package managers
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mix local.hex --force
+          mix local.rebar --force
+
+      # README.md's sibling-checkout switches. The lock is seeded from core's
+      # (docs/boards.md), and Cargo.lock re-resolved onto the patch before
+      # board-test.sh builds with --locked.
+      - name: Point the board at the checkout
+        working-directory: cairn-rockchip
+        run: |
+          cp ../cairn-nvr/mix.lock mix.lock
+          mkdir -p .cargo
+          cat >.cargo/config.toml <<'EOF'
+          [patch."https://github.com/bbangert/cairn-nvr.git"]
+          cairn-detect = { path = "../cairn-nvr/plugins/cairn-detect" }
+          cairn-ort = { path = "../cairn-nvr/plugins/cairn-ort" }
+          EOF
+          (cd native/cairn_rockchip && cargo metadata --format-version 1 >/dev/null)
+
+      - run: mix deps.get
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      - run: mix compile --warnings-as-errors
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      - run: mix deps.get
+        working-directory: cairn-nvr
+
+      # Builds core's release with no board, then the NIF and the board
+      # directory against it, and boots it.
+      - run: WORK="$RUNNER_TEMP/board-test" tools/board-test.sh
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      - run: BOARD_DIR="$RUNNER_TEMP/board-test/board" tools/attached-test.sh
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      - run: mix test
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      - if: always()
+        env:
+          SHA: ${{ needs.toolchain.outputs.sha }}
+        run: echo "Board checked against core \`main\` at \`$SHA\` (advisory)." >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,9 @@
+# Only what the Dockerfile copies: the board's Mix project and its crate.
+*
+!CORE_REF
+!mix.exs
+!mix.lock
+!lib
+!priv/profiles
+!native/cairn_rockchip
+native/cairn_rockchip/target
