@@ -7,8 +7,9 @@
 # built on, and the runtime's checks run on the target platform.
 #
 # The ARGs but CAIRN_REVISION are required and have no default:
-# tools/check-toolchain.sh derives them from CORE_REF and checks them against
-# the base image's labels, and image.yml passes its output. An unset
+# tools/check-toolchain.sh derives them from CORE_REF, checks all but
+# DEBIAN_TAG (which has no label) against the base image's labels, and
+# image.yml passes its output. An unset
 # version leaves a FROM naming no image, which fails the build; the contract
 # is tested where it is read.
 ARG CORE_VERSION
@@ -248,8 +249,8 @@ EOS
 # The board directory, written by `mix cairn_stage.board` against the .rel of
 # the base image this image is FROM. The task refuses an ERTS other than the
 # release's, an application the release also ships at another version, and a
-# release that ships the board, and writes nothing if anything fails; so the
-# board's lock and the release cannot disagree past this stage.
+# release that ships the board, and writes nothing if anything fails. That
+# holds versions, not commits: tools/check-toolchain.sh holds the commit.
 FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_TAG} AS board-build
 ARG CAIRN_CONTRACT
 

@@ -5,7 +5,7 @@
 # the shipped profile rk3566-tier1 loads, the probe and the profile's CPU
 # twins are where the profile and the host look, and the node is still up a
 # while later. MPP, RGA and librknnrt are opened only by a decoder or an
-# engine, so their absence here is not a failure. Needs docker; writes its
+# engine, so the missing hardware and librknnrt are not a failure. Needs docker; writes its
 # log and the mounted config and data under WORK (default: a fresh temporary
 # directory).
 set -uo pipefail
@@ -77,7 +77,7 @@ shell 'test -s /app/models/yolox_s.onnx && test -s /app/models/yolox_tiny.onnx' 
 say "PASS: the probe is on the PATH, the twins in /app/models"
 
 # A board application that exits halts the node (it is permanent), so a
-# late failure shows as a stopped or restarted container.
+# late failure shows as a stopped container.
 sleep 60
 [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$name")" = "true 0" ] ||
   fail "the node did not stay up"

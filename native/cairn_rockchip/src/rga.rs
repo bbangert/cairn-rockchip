@@ -12,6 +12,9 @@
 //! recycles and reallocates its buffers, so an fd number names no buffer for
 //! long.
 //!
+//! A host without `/dev/rga` is refused before librga is loaded: its failed
+//! device open is followed by a crash in the library, not an error return.
+//!
 //! librga logs to the process's **stdout**, through C stdio: one version line
 //! when its session opens, which [`Rga::open`]'s query does, and its error
 //! log. Opening the session also `setenv`s `ROCKCHIP_RGA_API_VERSION`.
@@ -20,6 +23,7 @@ pub mod sys;
 
 use std::ffi::{c_char, c_int, CStr, OsString};
 use std::os::fd::RawFd;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -33,6 +37,11 @@ use crate::pool::{Allocator, Lease};
 /// `CAIRN_RGA_LIBRARY` names the library to load; unset, the loader's search
 /// path finds this one.
 const DEFAULT_LIBRARY: &str = "librga.so.2";
+
+/// RGA's device node. Without it librga logs the failed open and the process
+/// then dies of SIGSEGV (seen at NIF load, booting the image under qemu), so
+/// [`Rga::open`] checks it before loading the library.
+const DEVICE: &str = "/dev/rga";
 
 /// librga's error and query texts run to 512 bytes; a message carries this
 /// many characters of one.
@@ -68,6 +77,11 @@ fn bounded(text: *const c_char) -> String {
     words
 }
 
+fn require_device(device: &Path) -> Result<()> {
+    ensure!(device.exists(), "{} is missing", device.display());
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub struct Rga {
     library: sys::Library,
@@ -75,6 +89,7 @@ pub struct Rga {
 
 impl Rga {
     pub fn open() -> Result<Self> {
+        require_device(Path::new(DEVICE))?;
         let path = std::env::var_os("CAIRN_RGA_LIBRARY")
             .unwrap_or_else(|| OsString::from(DEFAULT_LIBRARY));
         let library = sys::Library::load(&path)?;
@@ -429,6 +444,15 @@ impl Blitter {
 mod tests {
     use super::*;
     use sys::Rect;
+
+    #[test]
+    fn a_missing_device_is_refused_by_name() {
+        let msg = require_device(Path::new("/nonexistent/rga"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(msg, "/nonexistent/rga is missing");
+        assert!(require_device(Path::new("/dev/null")).is_ok());
+    }
 
     fn geometry(width: u32, height: u32) -> Geometry {
         let (hor_stride, ver_stride) = (width.next_multiple_of(16), height.next_multiple_of(16));
