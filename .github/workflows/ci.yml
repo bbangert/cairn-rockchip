@@ -27,7 +27,8 @@ jobs:
     # release in, named from that Dockerfile's ARGs as core's
     # release-toolchain job does, because `mix cairn_stage.board` refuses
     # another ERTS. mise.toml is held to the same ARGs, since it claims to be
-    # core's pin.
+    # core's pin, and for a tag to the base image's labels
+    # (tools/check-toolchain.sh).
     outputs:
       ref: ${{ steps.toolchain.outputs.ref }}
       image: ${{ steps.toolchain.outputs.image }}
@@ -39,20 +40,7 @@ jobs:
       - run: tools/check-core-ref.sh
 
       - id: toolchain
-        run: |
-          ref=$(tr -d '[:space:]' <CORE_REF)
-          curl -fsSL -o "$RUNNER_TEMP/Dockerfile" \
-            "https://raw.githubusercontent.com/bbangert/cairn-nvr/$ref/Dockerfile"
-          arg() { sed -n "s/^ARG $1=//p" "$RUNNER_TEMP/Dockerfile"; }
-          tool() { sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" mise.toml; }
-          otp=$(arg OTP_VERSION) elixir=$(arg ELIXIR_VERSION) debian=$(arg DEBIAN_TAG)
-          # mise names the Elixir build by the OTP major it was compiled for.
-          if [ "$(tool erlang)" != "$otp" ] || [ "$(tool elixir)" != "$elixir-otp-${otp%%.*}" ]; then
-            echo "::error file=mise.toml::mise.toml pins erlang $(tool erlang), elixir $(tool elixir); core's Dockerfile at $ref has OTP '$otp', Elixir '$elixir'"
-            exit 1
-          fi
-          echo "ref=$ref" >>"$GITHUB_OUTPUT"
-          echo "image=hexpm/elixir:$elixir-erlang-$otp-debian-$debian" >>"$GITHUB_OUTPUT"
+        run: tools/check-toolchain.sh >>"$GITHUB_OUTPUT"
 
   board:
     name: Board (Elixir gates, board directory booted on core, attached suite, mix test)

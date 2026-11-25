@@ -152,7 +152,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "cairn-detect"
 version = "0.1.0"
-source = "git+https://github.com/bbangert/cairn-nvr.git?rev=f0331afa6ec00c3bf8a527c944c3b61fa44c7d28#f0331afa6ec00c3bf8a527c944c3b61fa44c7d28"
+source = "git+https://github.com/bbangert/cairn-nvr.git?tag=v0.1.9#45161bd34f24c8fcced905d12808a16931e09195"
 dependencies = [
  "anyhow",
  "clap",
@@ -169,7 +169,7 @@ dependencies = [
 [[package]]
 name = "cairn-ort"
 version = "0.1.0"
-source = "git+https://github.com/bbangert/cairn-nvr.git?rev=f0331afa6ec00c3bf8a527c944c3b61fa44c7d28#f0331afa6ec00c3bf8a527c944c3b61fa44c7d28"
+source = "git+https://github.com/bbangert/cairn-nvr.git?tag=v0.1.9#45161bd34f24c8fcced905d12808a16931e09195"
 dependencies = [
  "anyhow",
  "cairn-detect",

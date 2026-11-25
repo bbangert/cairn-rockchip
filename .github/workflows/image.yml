@@ -1,0 +1,144 @@
+name: Image
+
+# The add-on image, built and booted, never pushed. Four jobs:
+#  - toolchain: CORE_REF names a core tag whose base image's labels agree
+#    with mise.toml, the contract cairn_stage carries and the commit the
+#    locks hold (tools/check-toolchain.sh); its output is every build
+#    argument the Dockerfile requires.
+#  - rockchip-libs: that stage alone, which fails fast when a pinned source
+#    no longer fetches, cross-builds or exports the symbols the NIF binds.
+#  - image: the linux/arm64 image, whose board-build stage writes the board
+#    directory against the base image's own .rel (guard 3), uploaded as a
+#    `docker load` tarball, which is how an unpublished image reaches a bench
+#    board.
+#  - boot: that tarball booted under qemu (guard 2, tools/image-smoke.sh), the
+#    job any publish job must `needs:`.
+#
+# Actions are pinned to commit SHAs, as core's container.yml pins them: a
+# publish job will hold a registry token in this workflow.
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - CORE_REF
+      - mise.toml
+      - mix.exs
+      - mix.lock
+      - lib/**
+      - priv/profiles/**
+      - native/**
+      - tools/core-ref.sh
+      - tools/check-core-ref.sh
+      - tools/check-toolchain.sh
+      - tools/image-smoke.sh
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: cairn-rockchip-aarch64:${{ github.sha }}
+
+jobs:
+  toolchain:
+    name: CORE_REF · base image labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      elixir: ${{ steps.check.outputs.elixir }}
+      otp: ${{ steps.check.outputs.otp }}
+      debian: ${{ steps.check.outputs.debian }}
+      contract: ${{ steps.check.outputs.contract }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: tools/check-core-ref.sh
+      # A sha CORE_REF passes ci.yml but has no base image to build on.
+      - id: check
+        run: |
+          tools/check-toolchain.sh >>"$GITHUB_OUTPUT"
+          grep -q '^version=' "$GITHUB_OUTPUT" ||
+            { echo "::error file=CORE_REF::CORE_REF is not a core version tag; no base image is published for it"; exit 1; }
+
+  rockchip-libs:
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      # No qemu: the stage runs on the build platform and cross-compiles.
+      # Every required argument, not only the stage's, so that the canary
+      # does not lean on how BuildKit treats the FROM of a stage it skips.
+      - run: >-
+          docker buildx build --platform linux/arm64 --target rockchip-libs
+          --build-arg CORE_VERSION=${{ needs.toolchain.outputs.version }}
+          --build-arg ELIXIR_VERSION=${{ needs.toolchain.outputs.elixir }}
+          --build-arg OTP_VERSION=${{ needs.toolchain.outputs.otp }}
+          --build-arg DEBIAN_TAG=${{ needs.toolchain.outputs.debian }}
+          --build-arg CAIRN_CONTRACT=${{ needs.toolchain.outputs.contract }} .
+
+  image:
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # qemu for the board-build and runtime stages; board-native and
+      # rockchip-libs cross-compile on the build host.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: |
+            CORE_VERSION=${{ needs.toolchain.outputs.version }}
+            ELIXIR_VERSION=${{ needs.toolchain.outputs.elixir }}
+            OTP_VERSION=${{ needs.toolchain.outputs.otp }}
+            DEBIAN_TAG=${{ needs.toolchain.outputs.debian }}
+            CAIRN_CONTRACT=${{ needs.toolchain.outputs.contract }}
+            CAIRN_REVISION=${{ github.sha }}
+          push: false
+          outputs: type=docker,dest=/tmp/cairn-rockchip-image.tar
+          tags: ${{ env.IMAGE }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cairn-rockchip-image
+          path: /tmp/cairn-rockchip-image.tar
+          retention-days: 3
+      - run: echo "Built \`$IMAGE\` — not pushed; download the \`cairn-rockchip-image\` artifact and \`docker load\` it." >>"$GITHUB_STEP_SUMMARY"
+
+  boot:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: cairn-rockchip-image
+          path: ${{ runner.temp }}
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - run: docker load -i "$RUNNER_TEMP/cairn-rockchip-image.tar"
+      - run: WORK="$RUNNER_TEMP/smoke" tools/image-smoke.sh "$IMAGE"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-smoke-log
+          path: ${{ runner.temp }}/smoke/image-smoke.log
