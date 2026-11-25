@@ -62,6 +62,10 @@ the release. `tools/attached-test.sh` (needs `CAIRN_CORE_PATH`) runs
 `test/attached`, core's application with this board attached, in the core
 checkout's test environment.
 
+CI (`.github/workflows/ci.yml`) runs all of the above and
+`tools/check-core-ref.sh`, in the image core's Dockerfile at `CORE_REF`
+builds the release in, and fails when `mise.toml` names another toolchain.
+
 `tools/rknn-export/` builds and scores the `.rknn` rungs on a host
 (its README); `tools/board-pipeline/` and `docs/bench.md` are the capacity
 cells run on the board.
