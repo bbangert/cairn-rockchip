@@ -1,0 +1,26 @@
+/_build/
+/deps/
+/priv/native/
+/cover/
+/doc/
+/tmp/
+erl_crash.dump
+.elixir_ls/
+target/
+# Uncommitted by design: a local Cargo patch, or a config with credentials.
+/.cargo/
+config.yml
+# The rknn-export workspace: conversions, the toolkit's venv and its caches.
+work/
+venv/
+__pycache__/
+.pytest_cache/
+# Weights and runtime headers are not ours to redistribute.
+*.onnx
+*.rknn
+*.pt
+*.npy
+*.npz
+rknn_api.h
+!/test/support/fixtures/models/stub.rknn
+!/test/support/fixtures/models/stub.onnx

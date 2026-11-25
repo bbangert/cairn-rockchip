@@ -1,0 +1,5 @@
+# Core's pin at CORE_REF: `mix cairn_stage.board` refuses an ERTS other than
+# the release's, so the board builds on the toolchain core's release does.
+[tools]
+erlang = "29.0.3"
+elixir = "1.20.2-otp-29"
