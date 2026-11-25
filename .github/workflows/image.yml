@@ -159,8 +159,9 @@ jobs:
           path: ${{ runner.temp }}/smoke/image-smoke.log
 
   publish:
-    if: github.ref_type == 'tag'
-    needs: boot
+    # A dispatch on a tag's ref would rebuild and overwrite a published version.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [boot, rockchip-libs]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

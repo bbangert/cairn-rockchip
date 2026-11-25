@@ -64,8 +64,8 @@ the release. `tools/attached-test.sh` (needs `CAIRN_CORE_PATH`) runs
 `test/attached`, core's application with this board attached, in the core
 checkout's test environment.
 
-CI (`.github/workflows/ci.yml`) runs all of the above and
-`tools/check-core-ref.sh`, in the image core's Dockerfile at `CORE_REF`
+CI (`.github/workflows/ci.yml`) runs all of the above,
+`tools/check-core-ref.sh` and `tools/check-release.sh`, in the image core's Dockerfile at `CORE_REF`
 builds the release in, and fails when `mise.toml` names another toolchain.
 `.github/workflows/nightly.yml` repeats the build and boot against core's
 `main` instead of `CORE_REF`; it is advisory and gates nothing.
@@ -127,13 +127,14 @@ To release, change the `version:` in `mix.exs` and in
 push the tag `v<version>` with it. The tag runs `image.yml`, whose publish
 job pushes the image that `boot` booted under qemu, not a rebuild, as
 `<version>` (no `latest`). Nothing orders the two refs for the store: it
-offers the new version from the moment the commit is on `main`, a few
-minutes before the image exists, and a board that installs in that
-window fails to pull and can retry. Never bump the add-on's `version:` in a
+offers the new version from its first reload after the commit is on `main`,
+and the image exists some ten minutes after the tag is pushed; an install
+in between fails to pull. The same holds for 0.1.0 until its tag is pushed:
+no image of this repository has been published yet. Never bump the add-on's `version:` in a
 commit that is not about to be tagged.
 
-Two checks refuse a release, both `tools/check-release.sh`. On every push
-and pull request (`ci.yml`) it fails when the add-on's `version:` and
+Two checks refuse a release, both `tools/check-release.sh`. On pull requests
+and pushes to `main` (`ci.yml`) it fails when the add-on's `version:` and
 `mix.exs`'s differ, or when the repository tracks any other
 `config.yaml`/`config.yml`/`config.json` (the store would read it as an
 add-on). Given the tag, as the first step of `image.yml`, it also fails when
