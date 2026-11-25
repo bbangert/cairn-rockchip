@@ -39,6 +39,8 @@ jobs:
 
       - run: tools/check-core-ref.sh
 
+      - run: tools/check-release.sh
+
       - id: toolchain
         run: tools/check-toolchain.sh >>"$GITHUB_OUTPUT"
 

@@ -7,27 +7,27 @@ image's release was built from; it is not in this repository.
 
 ## An unpublished image on a bench board
 
-Core's devcontainer has no docker, so core's CI builds every image. A manual dispatch
-of core's `container.yml` that is not asked to push uploads the image as a
-`docker load` tarball, and that is how a branch's image reaches a board
-without touching the registry (proven on the HA Green).
+`.github/workflows/image.yml` builds the image on a pull request or a manual
+dispatch and uploads it as a `docker load` tarball without pushing it, and
+that is how a branch's image reaches a board without touching the registry
+(proven on the HA Green).
 
 ```sh
-# host: build the branch's image, never pushing. Pass both inputs explicitly:
-# a ref whose workflow predates them then rejects the run instead of publishing.
-gh workflow run -R bbangert/cairn-nvr container.yml --ref <branch> -f board=rockchip -f push=false
-gh run download -R bbangert/cairn-nvr <run-id> -n cairn-image-rockchip -D stage/   # cairn-image.tar
+# host: build the branch's image. Dispatch on a branch, never on a version
+# tag: only a pushed tag publishes.
+gh workflow run -R bbangert/cairn-rockchip image.yml --ref <branch>
+gh run download -R bbangert/cairn-rockchip <run-id> -n cairn-rockchip-image -D stage/   # cairn-rockchip-image.tar
 # stage/ also holds config/config.yml, config/profiles/*.yml and SHA256SUMS
 sftp -b put.sftp <board>                  # into /root/<dir>: ext4, exec-capable
 # board (nerves_ssh eval → sh): verify, load, run as the add-on would
-sha256sum -c SHA256SUMS && podman load -q -i cairn-image.tar
+sha256sum -c SHA256SUMS && podman load -q -i cairn-rockchip-image.tar
 podman run -d --name cairn-p1 --network host \
   --security-opt unmask=/sys/firmware \
   --device /dev/mpp_service --device /dev/rga \
   --device /dev/dri/card1 --device /dev/dri/renderD129 \
   --device /dev/dma_heap/system --device /dev/dma_heap/system-uncached \
   -v /root/<dir>/config:/config:ro -v /root/<dir>/data:/data \
-  ghcr.io/bbangert/cairn-nvr-rockchip-aarch64:<version>
+  cairn-rockchip-aarch64:<commit>          # the name `podman load` printed
 # host: the numbers come over HTTP, not ssh
 curl -H "Authorization: Bearer <integrations.token>" http://<board>:4000/api/cameras
 ```
