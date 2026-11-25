@@ -93,9 +93,10 @@ docker buildx build --platform linux/arm64 \
   --build-arg CAIRN_CONTRACT=<contract> -t cairn-rockchip-aarch64:dev .
 ```
 
-`.github/workflows/image.yml` builds it on pull requests and on dispatch,
-never pushes it, and uploads it as the `cairn-rockchip-image` artifact, a
-`docker load` tarball for a bench board. Before the build,
+`.github/workflows/image.yml` builds it on pull requests, on dispatch and
+on a `v*` tag, and uploads it as the `cairn-rockchip-image` artifact, a
+`docker load` tarball for a bench board. Only a tag pushes it (see
+Releasing). Before the build,
 `tools/check-toolchain.sh` holds the base image's labels to this repository:
 `cairn.elixir.version` and `cairn.otp.version` to `mise.toml`,
 `cairn.contract` to the contract `cairn_stage` has at `CORE_REF`, and
@@ -112,6 +113,39 @@ guards stand between the board and a release it does not fit:
    the board directory against the `.rel` copied from the base image, and
    refuses another ERTS or an application the release ships at another
    version; the manifest's contract must also equal the label's.
+
+## Releasing and installing
+
+`cairn_rockchip/config.yaml` is the add-on vagus's store reads from this
+repository (`repository.yaml` names the repository). The store offers the
+`version:` that file has on `main` and pulls
+`ghcr.io/bbangert/cairn-rockchip-aarch64:<version>` anonymously, so the
+package must be public (set once, after the first push).
+
+To release, change the `version:` in `mix.exs` and in
+`cairn_rockchip/config.yaml` to the same value in one commit on `main`, and
+push the tag `v<version>` with it. The tag runs `image.yml`, whose publish
+job pushes the image that `boot` booted under qemu, not a rebuild, as
+`<version>` (no `latest`). Nothing orders the two refs for the store: it
+offers the new version from the moment the commit is on `main`, a few
+minutes before the image exists, and a board that installs in that
+window fails to pull and can retry. Never bump the add-on's `version:` in a
+commit that is not about to be tagged.
+
+Two checks refuse a release, both `tools/check-release.sh`. On every push
+and pull request (`ci.yml`) it fails when the add-on's `version:` and
+`mix.exs`'s differ, or when the repository tracks any other
+`config.yaml`/`config.yml`/`config.json` (the store would read it as an
+add-on). Given the tag, as the first step of `image.yml`, it also fails when
+the tag is not `v` plus that version or `CORE_REF` is a commit sha, before
+anything is built. A tag whose boot job fails publishes nothing.
+
+To install, add `https://github.com/bbangert/cairn-rockchip` as a repository
+in the vagus store, without a `#branch` (the store derives the add-on's
+slug from the URL, so another URL installs a second add-on with its own
+empty data), then install "Cairn NVR (Rockchip)"; see
+`cairn_rockchip/README.md`. The store downloads the whole default-branch
+archive and caps it at 32 MiB, so no models or large fixtures belong in git.
 
 ## Developing against a core checkout
 
