@@ -6,6 +6,11 @@ hardware decode and RGA scaling for `decoder: rkmpp`, and the RKNN engine for
 on the RK3566 of the HA Green; the profile it ships, `rk3566-tier1`, carries
 that board's budgets (`docs/evidence/rk3566-capacity-20261118.md`).
 
+What the board adds to a profile — `backend: rknn`, `decoder: rkmpp`, CPU
+twins, which families convert — is [docs/profiles.md](docs/profiles.md); the
+RKNN, MPP and RGA measurements behind it are
+[docs/npu-rknn.md](docs/npu-rknn.md).
+
 ## How it attaches
 
 Core's release ships no board. This project is built into a *board
@@ -81,8 +86,8 @@ cells run on the board.
 `CORE_REF` without its `v` (`tools/core-ref.sh`). It adds the MPP and librga
 userspace (cross-built from pinned source, MPP without its ION allocator),
 the board directory with `CAIRN_BOARD_DIR` pointing at it, the probe on the
-`PATH`, and the CPU twins core's Rockchip image bakes: the profile's two
-Megvii exports and the tiny file at 640. It takes its versions as build
+`PATH`, and the CPU twins: the profile's two Megvii exports and the tiny
+file at 640. It takes its versions as build
 arguments and has no defaults for them:
 
 ```sh
