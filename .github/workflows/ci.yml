@@ -1,0 +1,264 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Rust the local gates run on (`cargo +1.100.0`). Core's CI takes
+  # `stable`, which would let a new clippy lint turn this red with no change
+  # here.
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  core-ref:
+    name: CORE_REF · toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The toolchain is core's at CORE_REF: the image its Dockerfile builds the
+    # release in, named from that Dockerfile's ARGs as core's
+    # release-toolchain job does, because `mix cairn_stage.board` refuses
+    # another ERTS. mise.toml is held to the same ARGs, since it claims to be
+    # core's pin.
+    outputs:
+      ref: ${{ steps.toolchain.outputs.ref }}
+      image: ${{ steps.toolchain.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - run: tools/check-core-ref.sh
+
+      - id: toolchain
+        run: |
+          ref=$(tr -d '[:space:]' <CORE_REF)
+          curl -fsSL -o "$RUNNER_TEMP/Dockerfile" \
+            "https://raw.githubusercontent.com/bbangert/cairn-nvr/$ref/Dockerfile"
+          arg() { sed -n "s/^ARG $1=//p" "$RUNNER_TEMP/Dockerfile"; }
+          tool() { sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" mise.toml; }
+          otp=$(arg OTP_VERSION) elixir=$(arg ELIXIR_VERSION) debian=$(arg DEBIAN_TAG)
+          # mise names the Elixir build by the OTP major it was compiled for.
+          if [ "$(tool erlang)" != "$otp" ] || [ "$(tool elixir)" != "$elixir-otp-${otp%%.*}" ]; then
+            echo "::error file=mise.toml::mise.toml pins erlang $(tool erlang), elixir $(tool elixir); core's Dockerfile at $ref has OTP '$otp', Elixir '$elixir'"
+            exit 1
+          fi
+          echo "ref=$ref" >>"$GITHUB_OUTPUT"
+          echo "image=hexpm/elixir:$elixir-erlang-$otp-debian-$debian" >>"$GITHUB_OUTPUT"
+
+  board:
+    name: Board (Elixir gates, board directory booted on core, attached suite, mix test)
+    needs: core-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # One job, so the NIF is built once: tools/board-test.sh builds it and
+    # leaves it in priv/native, where the board's `mix test` then loads it.
+    # In the image core builds its release in: Debian 13, whose FFmpeg 7.1
+    # the NIF links (the runner's Ubuntu ships 6.1). Core is checked out
+    # beside this repository, as README.md lays it out.
+    container: ${{ needs.core-ref.outputs.image }}
+    env:
+      # The crate's cargo config points at a dev-container /opt/ffmpeg7.
+      FFMPEG_PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig
+      RUSTFLAGS: ""
+      CARGO_TERM_COLOR: always
+      LC_ALL: C.UTF-8
+
+    steps:
+      # git before checkout, which otherwise downloads a tarball; the rest is
+      # core's rockchip-board job's list: its release build and the crate.
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential git pkg-config libssl-dev clang libclang-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libpostproc-dev libswresample-dev libswscale-dev \
+            curl ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          path: cairn-rockchip
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: bbangert/cairn-nvr
+          ref: ${{ needs.core-ref.outputs.ref }}
+          path: cairn-nvr
+          persist-credentials: false
+
+      - name: Install Rust and Mix's package managers
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mix local.hex --force
+          mix local.rebar --force
+
+      # Dialyzer's PLTs are in _build/plts (mix.exs), so this caches them too.
+      # CORE_REF stands for core's mix.lock.
+      - name: Cache deps, builds, cargo and the onnxruntime download
+        uses: actions/cache@v6
+        with:
+          path: |
+            cairn-rockchip/deps
+            cairn-rockchip/_build
+            cairn-rockchip/native/cairn_rockchip/target
+            cairn-nvr/deps
+            cairn-nvr/_build
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/ort.pyke.io
+          key: board-${{ needs.core-ref.outputs.image }}-${{ env.RUST_TOOLCHAIN }}-${{ needs.core-ref.outputs.ref }}-${{ hashFiles('cairn-rockchip/mix.lock', 'cairn-rockchip/native/cairn_rockchip/Cargo.lock') }}
+          restore-keys: |
+            board-${{ needs.core-ref.outputs.image }}-${{ env.RUST_TOOLCHAIN }}-
+
+      # --check-locked: a lock deps.get would rewrite is not the one committed.
+      - run: mix deps.get --check-locked
+        working-directory: cairn-rockchip
+
+      - run: mix format --check-formatted
+        working-directory: cairn-rockchip
+
+      - run: mix compile --warnings-as-errors
+        working-directory: cairn-rockchip
+
+      - run: mix deps.unlock --check-unused
+        working-directory: cairn-rockchip
+
+      - run: mix hex.audit
+        working-directory: cairn-rockchip
+
+      - run: mix dialyzer --format github
+        working-directory: cairn-rockchip
+
+      - run: mix deps.get
+        working-directory: cairn-nvr
+
+      # Core's release with no board, as core's image builds it.
+      - name: Build core's release
+        run: mix release --overwrite
+        working-directory: cairn-nvr
+        env:
+          MIX_ENV: prod
+
+      # With REL and not CAIRN_CORE_PATH, so `cairn_stage` comes from git at
+      # CORE_REF, as it does for the image.
+      - run: WORK="$RUNNER_TEMP/board-test" tools/board-test.sh
+        working-directory: cairn-rockchip
+        env:
+          REL: ../cairn-nvr/_build/prod/rel/cairn
+
+      # BOARD_DIR, or the script builds a second directory, and the release
+      # again, with `cairn_stage` from the checkout.
+      - run: BOARD_DIR="$RUNNER_TEMP/board-test/board" tools/attached-test.sh
+        working-directory: cairn-rockchip
+        env:
+          CAIRN_CORE_PATH: ../cairn-nvr
+
+      # Native's tests skip themselves without the library; here none may.
+      - name: The NIF loads
+        run: mix run --no-start -e 'nil = Cairn.Rockchip.Native.load_error()'
+        working-directory: cairn-rockchip
+
+      - run: mix test
+        working-directory: cairn-rockchip
+
+  rust:
+    name: Rust · Format · Clippy · Test · Release build · Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Core's environment for this crate (its cairn-detect job): Debian 13 for
+    # the FFmpeg 7.1 rsmpeg's `ffmpeg7_1` binds, every libav*/libsw* dev
+    # package because rusty_ffmpeg's build script pkg-configs the whole set,
+    # and libssl-dev for ort-sys's build script, which downloads onnxruntime
+    # over TLS.
+    container: debian:13
+    env:
+      FFMPEG_PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig
+      RUSTFLAGS: ""
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config clang libclang-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libpostproc-dev libswresample-dev libswscale-dev \
+            libssl-dev \
+            curl ca-certificates git
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN" --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry, git, target and the onnxruntime download
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/ort.pyke.io
+            native/cairn_rockchip/target
+          key: cargo-debian13-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('native/cairn_rockchip/Cargo.lock') }}
+          restore-keys: |
+            cargo-debian13-${{ env.RUST_TOOLCHAIN }}-
+
+      # Per step, not a job default: the apt step runs before checkout. From
+      # the crate's directory either way, the only place cargo reads its
+      # .cargo/config.toml from.
+      - run: cargo fmt --check
+        working-directory: native/cairn_rockchip
+
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: native/cairn_rockchip
+
+      - run: cargo test --locked
+        working-directory: native/cairn_rockchip
+
+      - run: cargo build --locked --release
+        working-directory: native/cairn_rockchip
+
+      - run: cargo doc --locked --no-deps --document-private-items
+        working-directory: native/cairn_rockchip
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  rknn-export:
+    name: rknn-export pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The toolkit is not installed: the build needs it, the pure parts do not.
+    # Those parts are tested because the parity numbers decide which rungs ship.
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tools/rknn-export/tests/requirements.txt
+
+      - run: pip install -r tools/rknn-export/tests/requirements.txt
+
+      - run: python -m pytest tools/rknn-export
