@@ -10,8 +10,9 @@
 //! the board.
 //!
 //! `rknn_dup_context`'s prototype is from Rockchip's public API description;
-//! the probe's `--context-mode dup` is its one caller and ran it on the board
-//! (librknnrt 2.3.2), where the duplicates' outputs matched their parent's.
+//! the probe's `--context-mode dup` ran it on the board (librknnrt 2.3.2),
+//! where the duplicates' outputs matched their parent's, and the engine's
+//! slots after the first are made with it.
 //!
 //! The library is opened with `dlopen` at [`Library::load`], never linked: a
 //! build host has no librknnrt, and a board that lacks it should fail on the
@@ -270,7 +271,8 @@ pub struct Library {
     pub(super) outputs_release: OutputsReleaseFn,
     /// Or the first of them the runtime lacks, named.
     pub(super) mem: std::result::Result<MemApi, String>,
-    /// Only the probe's `--context-mode dup` calls it. Or why it is absent.
+    /// Or why it is absent, in which case the engine loads the artifact once
+    /// per context ([`Backend::sibling`](cairn_detect::infer::Backend::sibling)).
     pub(super) dup_context: std::result::Result<DupContextFn, String>,
 }
 

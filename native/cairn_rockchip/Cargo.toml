@@ -18,11 +18,11 @@ path = "src/bin/cairn-rockchip-probe.rs"
 anyhow = "1.0"
 # Core's crates at CORE_REF, one spelling of the ref in both entries:
 # tools/check-core-ref.sh holds this manifest and the lock to it.
-cairn-detect = { git = "https://github.com/bbangert/cairn-nvr.git", tag = "v0.1.9" }
+cairn-detect = { git = "https://github.com/bbangert/cairn-nvr.git", tag = "v0.1.10" }
 # The engine hosting — registry, gate, packing, teardown, term shapes and error
 # vocabulary — with `CairnOrt`'s own NIF entry off: rustler would otherwise
 # fold its NIFs into this library's.
-cairn-ort = { git = "https://github.com/bbangert/cairn-nvr.git", tag = "v0.1.9", default-features = false }
+cairn-ort = { git = "https://github.com/bbangert/cairn-nvr.git", tag = "v0.1.10", default-features = false }
 libc = "0.2"
 libloading = "0.8"
 serde_json = "1.0"
