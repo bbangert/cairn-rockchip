@@ -134,9 +134,8 @@ job pushes the image that `boot` booted under qemu, not a rebuild, as
 `<version>` (no `latest`). Nothing orders the two refs for the store: it
 offers the new version from its first reload after the commit is on `main`,
 and the image exists some ten minutes after the tag is pushed; an install
-in between fails to pull. The same holds for 0.1.0 until its tag is pushed:
-no image of this repository has been published yet. Never bump the add-on's `version:` in a
-commit that is not about to be tagged.
+in between fails to pull. Never bump the add-on's `version:` in a commit
+that is not about to be tagged.
 
 Two checks refuse a release, both `tools/check-release.sh`. On pull requests
 and pushes to `main` (`ci.yml`) it fails when the add-on's `version:` and
