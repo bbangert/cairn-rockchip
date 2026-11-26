@@ -293,10 +293,13 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
         }
         s.drain(&mut decoder, args.hold_after)?;
     }
-    let finishing = Instant::now();
+    let mut finishing = Instant::now();
     while !decoder.eos() && finishing.elapsed() < DEADLINE {
         decoder.finish()?;
+        // As in the feed loop: a `--contexts` run is not the wait for EOS.
+        let draining = Instant::now();
         s.drain(&mut decoder, args.hold_after)?;
+        finishing += draining.elapsed();
         thread::sleep(RETRY_SLEEP);
     }
     let stats = decoder.stats();

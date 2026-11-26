@@ -3,7 +3,7 @@
 //! every context runs one untimed pass of it, whose outputs it hashes, and
 //! then context 0 alone runs `--samples` timed passes: the baseline, measured
 //! as the threads are. Then one thread per context runs `--samples` passes,
-//! all let go together behind a barrier. A pass is `rknn_inputs_set`,
+//! all let go together behind a gate. A pass is `rknn_inputs_set`,
 //! `rknn_run`, `rknn_outputs_get` and the release. `ctx_total`'s `out` is
 //! context 0's hash, and a context's `agree` whether its own matches it.
 //!
@@ -21,7 +21,7 @@
 //! measurement with it. Each is under 100 bytes, which the board's ssh
 //! endpoint needs.
 
-use std::sync::Barrier;
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -136,7 +136,7 @@ impl Run<'_> {
         bytes: &[u8],
     ) -> Result<()> {
         // The warm passes and the baseline before any thread exists: a
-        // failure or panic in them cannot leave a thread on the barrier.
+        // failure or panic in them cannot leave a thread on the gate.
         let mut warm = Vec::with_capacity(backends.len());
         for (i, backend) in backends.iter_mut().enumerate() {
             let tensor =
@@ -149,33 +149,52 @@ impl Run<'_> {
         let (tensor, out) = warm.remove(0);
         let (tensor, solo) = timed(first, tensor, self.samples, out).context("context 0 alone")?;
         warm.insert(0, (tensor, out));
-        let start = Barrier::new(backends.len());
-        let results: Vec<_> = thread::scope(|scope| {
-            let handles: Vec<_> = backends
-                .iter_mut()
-                .zip(warm)
-                .map(|(backend, (tensor, out))| {
-                    let start = &start;
-                    // Each worker holds the only `&mut` to its context for
-                    // the run, which needs `RknnBackend: Send` and nothing
-                    // more — `cairn_detect`'s `Backend: Send` holds the type
-                    // to it, nothing is shared, and no `unsafe` is added
-                    // here. Whether librknnrt runs a context on a thread
-                    // other than the one that made it is what this finds out.
-                    scope.spawn(move || {
-                        start.wait();
-                        Ok(timed(backend, tensor, self.samples, out)?.1)
-                    })
-                })
-                .collect();
-            handles
+        // `Some(true)` lets the workers go, `Some(false)` sends them home. Not
+        // a `Barrier`: one sized for every context would hold the workers
+        // already made for ever if a later thread could not be created.
+        let start = (Mutex::new(None::<bool>), Condvar::new());
+        let results = thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(backends.len());
+            let mut refused = None;
+            for (i, (backend, (tensor, out))) in backends.iter_mut().zip(warm).enumerate() {
+                let start = &start;
+                let worker = move || {
+                    let held = start.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    let go = *start
+                        .1
+                        .wait_while(held, |go| go.is_none())
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if go != Some(true) {
+                        anyhow::bail!("not started");
+                    }
+                    Ok(timed(backend, tensor, self.samples, out)?.1)
+                };
+                // Each worker holds the only `&mut` to its context for
+                // the run, which needs `RknnBackend: Send` and nothing
+                // more — `cairn_detect`'s `Backend: Send` holds the type
+                // to it, nothing is shared, and no `unsafe` is added
+                // here. Whether librknnrt runs a context on a thread
+                // other than the one that made it is what this finds out.
+                match thread::Builder::new().spawn_scoped(scope, worker) {
+                    Ok(handle) => handles.push(handle),
+                    Err(e) => {
+                        refused =
+                            Some(anyhow::Error::new(e).context(format!("context {i}'s thread")));
+                        break;
+                    }
+                }
+            }
+            *start.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(refused.is_none());
+            start.1.notify_all();
+            let joined: Vec<_> = handles
                 .into_iter()
                 .map(|h| {
                     h.join()
                         .unwrap_or_else(|_| anyhow::bail!("a context's thread panicked"))
                 })
-                .collect()
-        });
+                .collect();
+            refused.map_or(Ok(joined), Err)
+        })?;
         let workers = results
             .into_iter()
             .enumerate()
