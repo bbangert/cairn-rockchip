@@ -33,7 +33,7 @@ const USAGE: &str = "usage: cairn-rockchip-probe --rk-probe <annexb-file> \
 
 /// Output is at most 34 lines whatever the input: the open line, up to
 /// [`INFO_CHANGE_LINES`], one line per stream and the total, plus
-/// `--scale`'s two or `--infer`'s two, or with `--contexts N` N + 5 (each
+/// `--scale`'s two or `--infer`'s two, or with `--contexts N` N + 6 (each
 /// runs one stream, and N is at most 8) — or, on an error, the lines before
 /// it and the error line. Under `--scale` librga
 /// adds lines of its own, not JSON (see [`crate::rga`]), and under `--infer`

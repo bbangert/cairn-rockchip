@@ -615,7 +615,8 @@ pub enum DestroyOrder {
 /// Contexts of one artifact for the probe's `--contexts`, destroyed in the
 /// [`DestroyOrder`] asked for. The NIF holds one [`RknnBackend`], never this.
 pub struct Contexts {
-    /// The one `rknn_init` made first: the parent in [`ContextMode::Dup`].
+    /// Every context; the first is the one `rknn_init` made first, the
+    /// parent in [`ContextMode::Dup`].
     backends: Vec<RknnBackend>,
     mode: ContextMode,
     /// The parent's artifact bytes in [`ContextMode::Dup`], taken out of its
@@ -841,6 +842,7 @@ pub(crate) mod tests {
         AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst,
     };
     use std::sync::{Mutex, MutexGuard};
+    use std::thread::ThreadId;
 
     /// The descriptor's values, in the form `Cairn.Rockchip.Board.backends/0`
     /// mirrors; [`RKNN`]'s note says which are established and which are a
@@ -1049,6 +1051,7 @@ pub(crate) mod tests {
     /// Per context, for the tests that open more than one: `CALLS` cannot
     /// tell them apart.
     static BY_CTX: Mutex<Vec<(sys::Context, &str)>> = Mutex::new(Vec::new());
+    static RUN_THREADS: Mutex<Vec<(sys::Context, ThreadId)>> = Mutex::new(Vec::new());
     static DUPS: AtomicU64 = AtomicU64::new(0);
     static DUP_CODE: AtomicI32 = AtomicI32::new(0);
     /// What `stub_init` hands out; a duplicate is numbered from `FIRST_DUP`.
@@ -1093,6 +1096,7 @@ pub(crate) mod tests {
         NEXT_FD.store(0, SeqCst);
         MEM_SHORT.store(0, SeqCst);
         BY_CTX.lock().unwrap().clear();
+        RUN_THREADS.lock().unwrap().clear();
         DUPS.store(0, SeqCst);
         DUP_CODE.store(0, SeqCst);
         guard
@@ -1193,6 +1197,10 @@ pub(crate) mod tests {
 
     unsafe extern "C" fn stub_run(ctx: sys::Context, _: *mut c_void) -> c_int {
         on(ctx, "rknn_run");
+        RUN_THREADS
+            .lock()
+            .unwrap()
+            .push((ctx, std::thread::current().id()));
         call("rknn_run");
         RUN_CODE.load(SeqCst)
     }
@@ -1563,6 +1571,11 @@ pub(crate) mod tests {
         let opened = Contexts::with_library(library, &path, count, mode);
         std::fs::remove_file(&path).unwrap();
         opened
+    }
+
+    /// Each `rknn_run`'s context and the thread it ran on, in call order.
+    pub(crate) fn run_threads() -> Vec<(sys::Context, ThreadId)> {
+        RUN_THREADS.lock().unwrap().clone()
     }
 
     /// The contexts `name` was called on, in call order.

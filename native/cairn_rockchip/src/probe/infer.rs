@@ -107,7 +107,7 @@ pub struct Infer {
     /// The slot's, handed to the model unchanged.
     pub order: ChannelOrder,
     pub slots: usize,
-    /// Per context under `contexts` above 1.
+    /// Per context under `contexts` above 1, and for context 0 alone before.
     pub samples: u64,
     pub contexts: usize,
     pub mode: ContextMode,

@@ -239,7 +239,8 @@ type DestroyMemFn = unsafe extern "C" fn(Context, *mut TensorMem) -> c_int;
 type SetIoMemFn = unsafe extern "C" fn(Context, *mut TensorMem, *mut TensorAttr) -> c_int;
 type MemSyncFn = unsafe extern "C" fn(Context, *mut TensorMem, c_int) -> c_int;
 /// `int rknn_dup_context(rknn_context* context_in, rknn_context* context_out)`,
-/// as the public API description gives it; to be confirmed on the board.
+/// as the public API description gives it; run on the board (see the module
+/// doc).
 type DupContextFn = unsafe extern "C" fn(*mut Context, *mut Context) -> c_int;
 
 /// The input-mem entry points, loaded as a set apart from the required ones:
