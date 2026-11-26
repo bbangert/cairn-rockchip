@@ -21,6 +21,11 @@
 //! behaviour on `rknn_destroy_mem` of an imported fd is undocumented. The
 //! probe closes those the runtime left open. It is `null` for `copy` and
 //! `mem`.
+//!
+//! `--contexts` above 1 replaces the per-sample timing with the `contexts`
+//! submodule's concurrency run, `--input copy` only.
+
+mod contexts;
 
 use std::ffi::c_void;
 use std::os::fd::{BorrowedFd, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
@@ -28,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context as _, Result};
-use cairn_detect::infer::{Backend, InputTensor, SessionOptions, TensorLayout, TensorValues};
+use cairn_detect::infer::{Backend, InputTensor, TensorLayout, TensorValues};
 use serde_json::{json, Value};
 
 use super::scale::{chain, fnv1a, hex, Planned, Scale, FNV_OFFSET};
@@ -37,15 +42,18 @@ use crate::dma::{DmaBuf, DmaHeap, SYSTEM_HEAP};
 use crate::mpp::Frame;
 use crate::pool::Allocator;
 use crate::rga::{ChannelOrder, Plan, Rga, Slot, SlotAllocator};
-use crate::rknn::{sys, InputMem, MemSync, RknnBackend};
+use crate::rknn::{sys, ContextMode, Contexts, DestroyOrder, InputMem, MemSync, RknnBackend};
 
-pub(super) const FLAGS: [&str; 6] = [
+pub(super) const FLAGS: [&str; 9] = [
     "--infer",
     "--input",
     "--sync",
     "--order",
     "--slots",
     "--samples",
+    "--contexts",
+    "--context-mode",
+    "--destroy-order",
 ];
 const MAX_SLOTS: usize = 4;
 /// `out_marks` gets the running `out_hash` every this many samples, at most
@@ -99,7 +107,10 @@ pub struct Infer {
     /// The slot's, handed to the model unchanged.
     pub order: ChannelOrder,
     pub slots: usize,
+    /// Per context under `contexts` above 1.
     pub samples: u64,
+    pub contexts: usize,
+    pub mode: ContextMode,
 }
 
 /// [`FLAGS`] as given, the last of a repeated one winning.
@@ -132,6 +143,29 @@ pub(super) fn resolve(
     if samples == 0 {
         return Err("--samples counts from 1".into());
     }
+    let contexts = given("--contexts").map_or(Ok(1), |v| super::number("--contexts", v))?;
+    if !(1..=contexts::MAX_CONTEXTS).contains(&contexts) {
+        return Err(format!("--contexts is 1 to {}", contexts::MAX_CONTEXTS));
+    }
+    if contexts > 1 && input != InputMode::Copy {
+        return Err("--contexts above 1 runs --input copy".into());
+    }
+    let dup = pick(
+        "--context-mode",
+        given("--context-mode").unwrap_or("load"),
+        &contexts::MODES,
+    )?;
+    let destroy = given("--destroy-order")
+        .map(|v| pick("--destroy-order", v, &contexts::DESTROY_ORDERS))
+        .transpose()?;
+    let mode = match (dup, destroy) {
+        (false, Some(_)) => return Err("--destroy-order needs --context-mode dup".into()),
+        (false, None) => ContextMode::Load,
+        (true, _) if contexts == 1 => {
+            return Err("--context-mode dup needs --contexts 2 or more".into())
+        }
+        (true, destroy) => ContextMode::Dup(destroy.unwrap_or(DestroyOrder::DupFirst)),
+    };
     let model = model.into();
     Ok(Some(Infer {
         model,
@@ -140,6 +174,8 @@ pub(super) fn resolve(
         order,
         slots,
         samples,
+        contexts,
+        mode,
     }))
 }
 
@@ -263,10 +299,10 @@ struct Samples {
 }
 
 pub(super) struct Inferer {
-    // Declared in drop order: the backend's mems wrap, or are, the slots'
-    // buffers, so they and the context go first, then the dups they were
-    // handed, then the slots.
-    backend: RknnBackend,
+    // Declared in drop order: the first context's mems wrap, or are, the
+    // slots' buffers, so they and the contexts go first, then the dups they
+    // were handed, then the slots.
+    contexts: Contexts,
     /// One per slot, for `slot_fds_intact`.
     imported: Imports,
     planned: Option<Planned>,
@@ -282,6 +318,10 @@ pub(super) struct Inferer {
     /// `copy`'s bytes, reused.
     bytes: Vec<u8>,
     s: Samples,
+    /// `VmRSS` before the contexts opened and after, for `--contexts`.
+    rss: [Option<u64>; 2],
+    /// Whether `--contexts`' run has been made.
+    ran: bool,
 }
 
 impl Inferer {
@@ -290,7 +330,13 @@ impl Inferer {
     pub(super) fn open(scale: &Scale, infer: &Infer) -> Result<Self> {
         let rga = Rga::open()?;
         let heap = DmaHeap::open(Path::new(SYSTEM_HEAP))?;
-        let mut backend = RknnBackend::open(&infer.model, &SessionOptions::default())?;
+        let before = contexts::rss_kb();
+        // All here, none on `--contexts`' workers: a `with_runtime` path
+        // lives in the opening thread's local, which a worker's open would
+        // not see, and `rss` needs them all open before the run.
+        let mut contexts = Contexts::open(&infer.model, infer.contexts, infer.mode)?;
+        let rss = [before, contexts::rss_kb()];
+        let backend = contexts.first();
         let io = backend.io();
         let size = io
             .declared_input_size
@@ -301,7 +347,7 @@ impl Inferer {
         let outputs = io.outputs.iter().map(|d| d.name.clone()).collect();
         let native = backend.native_input()?;
         Ok(Self {
-            backend,
+            contexts,
             imported: Imports::default(),
             planned: None,
             mems: Vec::new(),
@@ -314,6 +360,8 @@ impl Inferer {
             frames: 0,
             bytes: Vec::new(),
             s: Samples::default(),
+            rss,
+            ran: false,
         })
     }
 
@@ -333,7 +381,7 @@ impl Inferer {
         if self.infer.input == InputMode::Mem {
             let mut mems = FromMems {
                 slots,
-                backend: &mut self.backend,
+                backend: self.contexts.first(),
                 mems: Vec::new(),
             };
             self.planned = Some(Planned::new(self.rga, plan, count, &mut mems)?);
@@ -364,7 +412,8 @@ impl Inferer {
                 // `self.planned` the mapping, until after the backend drops
                 // (see the field order); the mapping is only ever read.
                 let mem = unsafe {
-                    self.backend
+                    self.contexts
+                        .first()
                         .import_input(dup, slot.addr().as_ptr().cast::<c_void>())
                 }?;
                 self.mems.push(mem);
@@ -376,13 +425,16 @@ impl Inferer {
     pub(super) fn frame(&mut self, frame: &Frame) -> Result<()> {
         self.frames += 1;
         let due = (self.frames - 1).is_multiple_of(self.scale.every);
-        if !due || self.s.blit_ms.len() as u64 >= self.infer.samples {
+        if !due || self.ran || self.s.blit_ms.len() as u64 >= self.infer.samples {
             return Ok(());
         }
         ensure!(frame.is_nv12(), "--infer needs linear NV12 frames");
         self.plan(frame)?;
+        if self.infer.contexts > 1 {
+            return self.run_contexts(frame);
+        }
         let Planned { blitter, pool } = self.planned.as_mut().expect("set above");
-        let (backend, s) = (&mut self.backend, &mut self.s);
+        let (backend, s) = (self.contexts.first(), &mut self.s);
 
         let (cpu, proc_cpu) = (thread_cpu(), process_cpu_total());
         let started = Instant::now();
@@ -456,16 +508,39 @@ impl Inferer {
         Ok(())
     }
 
+    /// One blit of `frame`, read back as `copy` reads it, then every context
+    /// running it at once.
+    fn run_contexts(&mut self, frame: &Frame) -> Result<()> {
+        self.ran = true;
+        let Planned { blitter, pool } = self.planned.as_mut().expect("planned by the caller");
+        let mut lease = pool.acquire().context("no free slot")?;
+        blitter.blit(
+            frame.fd(),
+            frame.geometry(),
+            frame.is_full_range(),
+            &mut lease,
+        )?;
+        let mut bytes = Vec::new();
+        lease.slot().read(|slot| bytes.extend_from_slice(slot))?;
+        drop(lease);
+        let run = contexts::Run {
+            mode: self.infer.mode,
+            samples: self.infer.samples,
+            outputs: &self.outputs,
+            rss: self.rss,
+        };
+        run.run(self.contexts.all(), self.scale.size, &bytes)
+    }
+
     pub(super) fn report(mut self) -> Result<Vec<Value>> {
+        let plan = self.plan_line();
+        if self.infer.contexts > 1 {
+            return Ok(self.report_contexts(plan));
+        }
         // Destroys the mems and the context, so no dup settled below is
         // still the runtime's.
-        drop(self.backend);
+        drop(self.contexts);
         let intact = (self.infer.input == InputMode::Fd).then(|| self.imported.settle());
-        let mut plan = json!({"event": "scale_plan", "rga": self.rga.version(), "plans": 0});
-        if let Some(planned) = &self.planned {
-            plan["plans"] = 1.into();
-            plan["plan"] = planned.json(self.scale.policy);
-        }
         let exhausted = self
             .planned
             .as_ref()
@@ -493,6 +568,26 @@ impl Inferer {
             "process_cpu_ms": process_cpu(),
         });
         Ok(vec![plan, line])
+    }
+
+    fn plan_line(&self) -> Value {
+        let mut plan = json!({"event": "scale_plan", "rga": self.rga.version(), "plans": 0});
+        if let Some(planned) = &self.planned {
+            plan["plans"] = 1.into();
+            plan["plan"] = planned.json(self.scale.policy);
+        }
+        plan
+    }
+
+    /// `plan`, then a line that says every context was destroyed and the
+    /// process lived through it.
+    fn report_contexts(self, plan: Value) -> Vec<Value> {
+        drop(self.contexts);
+        let (mode, order) = contexts::mode_names(self.infer.mode);
+        let teardown = json!({
+            "event": "ctx_teardown", "mode": mode, "order": order, "ran": self.ran,
+        });
+        vec![plan, teardown]
     }
 }
 

@@ -9,6 +9,10 @@
 //! the probe's `--infer` is the one caller of either here, and ran both on
 //! the board.
 //!
+//! `rknn_dup_context`'s prototype is from Rockchip's public API description
+//! alone, unconfirmed on the board until the probe's `--context-mode dup`
+//! has run there.
+//!
 //! The library is opened with `dlopen` at [`Library::load`], never linked: a
 //! build host has no librknnrt, and a board that lacks it should fail on the
 //! open naming the file rather than refuse to start the binary.
@@ -234,9 +238,13 @@ type CreateMemFromFdFn =
 type DestroyMemFn = unsafe extern "C" fn(Context, *mut TensorMem) -> c_int;
 type SetIoMemFn = unsafe extern "C" fn(Context, *mut TensorMem, *mut TensorAttr) -> c_int;
 type MemSyncFn = unsafe extern "C" fn(Context, *mut TensorMem, c_int) -> c_int;
+/// `int rknn_dup_context(rknn_context* context_in, rknn_context* context_out)`,
+/// as the public API description gives it; to be confirmed on the board.
+type DupContextFn = unsafe extern "C" fn(*mut Context, *mut Context) -> c_int;
 
 /// The input-mem entry points, loaded as a set apart from the required ones:
 /// a runtime without them still opens and runs by copy.
+#[derive(Clone)]
 pub struct MemApi {
     pub(super) create_mem: CreateMemFn,
     pub(super) create_mem_from_fd: CreateMemFromFdFn,
@@ -248,7 +256,9 @@ pub struct MemApi {
 /// The entry points this crate calls. The runtime is never unloaded, so they
 /// stay valid for the process: a `dlclose` under whatever threads and exit
 /// handlers a vendor runtime leaves behind risks a crash at exit that would
-/// hide the probe's own exit status, or take the node down with it.
+/// hide the probe's own exit status, or take the node down with it. A clone
+/// is the same pointers, as valid.
+#[derive(Clone)]
 pub struct Library {
     pub(super) init: InitFn,
     pub(super) destroy: DestroyFn,
@@ -259,6 +269,8 @@ pub struct Library {
     pub(super) outputs_release: OutputsReleaseFn,
     /// Or the first of them the runtime lacks, named.
     pub(super) mem: std::result::Result<MemApi, String>,
+    /// Only the probe's `--context-mode dup` calls it. Or why it is absent.
+    pub(super) dup_context: std::result::Result<DupContextFn, String>,
 }
 
 impl Library {
@@ -269,36 +281,58 @@ impl Library {
         let library = unsafe { libloading::Library::new(path) }
             .with_context(|| format!("loading the RKNN runtime {shown}"))?;
         // Never dropped, so a failed symbol lookup below does not `dlclose` a
-        // runtime whose initialisers have already run.
+        // runtime whose initialisers have already run, and every address
+        // looked up stays valid.
         let library = std::mem::ManuallyDrop::new(library);
+        Self::resolve(&shown, |name| {
+            let name = format!("{name}\0");
+            // SAFETY: the address is read out of the `Symbol` as a plain
+            // pointer, never through it.
+            let symbol = unsafe { library.get::<*mut c_void>(name.as_bytes()) }?;
+            Ok(*symbol)
+        })
+    }
+
+    /// The entry points by `lookup`'s addresses, which must be the named
+    /// librknnrt symbols' and stay valid for the process.
+    fn resolve(shown: &str, lookup: impl Fn(&str) -> Result<*mut c_void>) -> Result<Self> {
         macro_rules! symbol {
-            ($name:literal) => {
-                // SAFETY: the type is the C prototype this symbol has in
-                // librknnrt; the pointer is copied out of the `Symbol`, and
-                // `library` is never dropped, so it stays valid.
-                *unsafe { library.get(concat!($name, "\0").as_bytes()) }
-                    .with_context(|| format!("the RKNN runtime {shown} has no {}", $name))?
-            };
+            ($name:literal, $ty:ty) => {{
+                let addr = lookup($name)
+                    .with_context(|| format!("the RKNN runtime {shown} has no {}", $name))?;
+                if addr.is_null() {
+                    anyhow::bail!("the RKNN runtime {shown} has a null {}", $name);
+                }
+                // SAFETY: a non-null address of this symbol, whose C
+                // prototype is `$ty`.
+                unsafe { std::mem::transmute::<*mut c_void, $ty>(addr) }
+            }};
         }
         let mem = (|| -> Result<MemApi> {
             Ok(MemApi {
-                create_mem: symbol!("rknn_create_mem"),
-                create_mem_from_fd: symbol!("rknn_create_mem_from_fd"),
-                destroy_mem: symbol!("rknn_destroy_mem"),
-                set_io_mem: symbol!("rknn_set_io_mem"),
-                mem_sync: symbol!("rknn_mem_sync"),
+                create_mem: symbol!("rknn_create_mem", CreateMemFn),
+                create_mem_from_fd: symbol!("rknn_create_mem_from_fd", CreateMemFromFdFn),
+                destroy_mem: symbol!("rknn_destroy_mem", DestroyMemFn),
+                set_io_mem: symbol!("rknn_set_io_mem", SetIoMemFn),
+                mem_sync: symbol!("rknn_mem_sync", MemSyncFn),
             })
         })()
         .map_err(|err| format!("{err:#}"));
+        // The outermost message alone, without the loader's under it: the
+        // probe prints it on a line the board's ssh endpoint must not drop.
+        let dup_context =
+            (|| -> Result<DupContextFn> { Ok(symbol!("rknn_dup_context", DupContextFn)) })()
+                .map_err(|err| err.to_string());
         Ok(Self {
-            init: symbol!("rknn_init"),
-            destroy: symbol!("rknn_destroy"),
-            query: symbol!("rknn_query"),
-            inputs_set: symbol!("rknn_inputs_set"),
-            run: symbol!("rknn_run"),
-            outputs_get: symbol!("rknn_outputs_get"),
-            outputs_release: symbol!("rknn_outputs_release"),
+            init: symbol!("rknn_init", InitFn),
+            destroy: symbol!("rknn_destroy", DestroyFn),
+            query: symbol!("rknn_query", QueryFn),
+            inputs_set: symbol!("rknn_inputs_set", InputsSetFn),
+            run: symbol!("rknn_run", RunFn),
+            outputs_get: symbol!("rknn_outputs_get", OutputsGetFn),
+            outputs_release: symbol!("rknn_outputs_release", OutputsReleaseFn),
             mem,
+            dup_context,
         })
     }
 }
@@ -321,11 +355,44 @@ mod tests {
     }
 
     /// A real library that is not the runtime fails on the first required
-    /// symbol, by name: the mem entry points are looked up before it, and
-    /// their absence is kept, not raised.
+    /// symbol, by name: the mem entry points and `rknn_dup_context` are
+    /// looked up before it, and their absence is kept, not raised.
     #[test]
     fn a_library_without_the_symbols_names_the_first_required_one() {
         let msg = load_err("libm.so.6");
         assert!(msg.contains("has no rknn_init"), "{msg}");
+    }
+
+    extern "C" fn never_called() {}
+
+    /// Every name but `absent`, at an address never called.
+    fn resolve_without(absent: &'static str) -> Library {
+        let addr = never_called as extern "C" fn() as *mut c_void;
+        Library::resolve("stub", |name| {
+            anyhow::ensure!(name != absent, "not exported");
+            Ok(addr)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_runtime_without_rknn_dup_context_loads_and_names_it() {
+        let without = resolve_without("rknn_dup_context");
+        assert!(without.mem.is_ok());
+        let missing = without.dup_context.err().unwrap();
+        assert!(
+            missing.contains("stub has no rknn_dup_context"),
+            "{missing}"
+        );
+        assert!(resolve_without("none of them").dup_context.is_ok());
+    }
+
+    #[test]
+    fn a_null_symbol_is_refused_by_name() {
+        let msg = match Library::resolve("stub", |_| Ok(std::ptr::null_mut())) {
+            Ok(_) => panic!("a null entry point loaded"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(msg.contains("stub has a null rknn_init"), "{msg}");
     }
 }
