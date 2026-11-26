@@ -1,0 +1,59 @@
+{
+  "mit": {
+    "repo": "MultimediaTechLab/YOLO",
+    "url": "https://github.com/MultimediaTechLab/YOLO.git",
+    "commit": "c4cb5f6f56102eceeaa7d75e23e1125cd0373eaf",
+    "release_tag": "v1.0-alpha",
+    "release_url": "https://github.com/MultimediaTechLab/YOLO/releases/download/v1.0-alpha",
+    "checkpoints": [
+      {
+        "name": "v9-t.pt",
+        "bytes": 12244990,
+        "sha256": "73a51422da00db19af048e876b392591065db8872ee1aa41d5d8354169141be2"
+      },
+      {
+        "name": "v9-s.pt",
+        "bytes": 39930046,
+        "sha256": "8a2c74fff91e9649cfe6ccf9d173926fc85fab1a28ec8c8e762c099304624a86"
+      },
+      {
+        "name": "v9-m.pt",
+        "bytes": 132216478,
+        "sha256": "e4e4ecbf2bb113dfb64372a1d623957d9f1b18de7c6980d202ddd71bc9a85556"
+      }
+    ]
+  },
+  "coco": {
+    "images": 5000,
+    "categories": 80,
+    "images_manifest": {
+      "files": 5000,
+      "sha256": "d49e2835a2a1c8d867f77292feb12778de5f1128b0eb7bbcd35476e29c2a6cd5"
+    },
+    "archives": [
+      {
+        "name": "val2017.zip",
+        "url": "http://images.cocodataset.org/zips/val2017.zip",
+        "bytes": 815585330,
+        "sha256": "4f7e2ccb2866ec5041993c9cf2a952bbed69647b115d0f74da7ce8f4bef82f05",
+        "extracted_bytes": 820000000,
+        "members": null
+      },
+      {
+        "name": "annotations_trainval2017.zip",
+        "url": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+        "bytes": 252907541,
+        "sha256": "113a836d90195ee1f884e704da6304dfaaecff1f023f49b6ca93c4aaae470268",
+        "extracted_bytes": 26000000,
+        "members": [
+          "annotations/instances_val2017.json"
+        ]
+      }
+    ],
+    "annotations_file": {
+      "path": "annotations/instances_val2017.json",
+      "bytes": 19987840,
+      "sha256": "e8c7f7908f1d7278341fae127d0da654f102f11bd7b21d8aeefa635b8c810b6f"
+    }
+  }
+}
