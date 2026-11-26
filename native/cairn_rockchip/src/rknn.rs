@@ -102,9 +102,11 @@ static RKNN: Descriptor = Descriptor {
 /// How many contexts of the model the engine holds, each a slot a camera's
 /// pass can run on while another's runs; every one after the first is a
 /// duplicate of it where the runtime can make one ([`Backend::sibling`]).
-/// The canary's probe-load makes as many ([`cli_provider`]). Provisional:
-/// the boundary runs choose the value.
-pub const CONTEXTS: usize = 2;
+/// The canary's probe-load makes as many ([`cli_provider`]). The NPU runs
+/// one job at a time, so a context only fills the CPU part of another's pass:
+/// two held five yolox_s 640 cameras and three six, and at `schedutil` a fourth
+/// held no more than three (`docs/evidence/rk3566-capacity-20261126.md`).
+pub const CONTEXTS: usize = 3;
 
 type Open = fn(&Path, &SessionOptions) -> Result<Box<dyn Backend>>;
 
@@ -121,9 +123,10 @@ fn engine_provider(open: Open) -> Provider {
 /// `--backend rknn` for [`cairn_detect::cli::run`], which the canary's
 /// probe-load runs. The binary runs every pass on one context, but its open
 /// first makes the engine's other [`CONTEXTS`] the way the engine does and
-/// drops them: a runtime that fails or crashes making or destroying the
-/// second context must do so in the canary's process, not at the VM's boot.
-/// No pass runs while two are alive, so that is still the VM's to find.
+/// drops them: a runtime that fails or crashes making or destroying a
+/// further context must do so in the canary's process, not at the VM's boot.
+/// No pass runs while more than one is alive, so that is still the VM's to
+/// find.
 pub fn cli_provider() -> Provider {
     Provider::new(&RKNN, |model, options| {
         cli_open(|| RknnBackend::open(model, options))
@@ -240,7 +243,7 @@ struct OutputMeta {
 /// mutable between them: each has its own context, mems, held input and
 /// output buffers. What a duplicate shares with its parent is the entry
 /// points, which are plain addresses, and the artifact bytes, which nothing
-/// here touches after `rknn_init`. That the runtime runs two contexts at
+/// here touches after `rknn_init`. That the runtime runs several contexts at
 /// once is the board's finding (the probe's `--contexts`), not the API's.
 pub struct RknnBackend {
     session: Session,

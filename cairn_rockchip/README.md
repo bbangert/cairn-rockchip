@@ -25,11 +25,11 @@ nodes: `decoder: rkmpp` decodes through MPP and scales through the RGA, and
 
 ## What `rk3566-tier1` carries
 
-Up to nine cameras with detection. Up to four run YOLOX-s at 640; five to
-nine run YOLOX-tiny at 416, each measured at 1.84 detection passes a second
-at nine; a tenth is refused at config load. Both limits were measured on a
-Home Assistant Green: what runs out is the engine's one RKNN context, not
-decode or memory ([`docs/evidence/rk3566-capacity-20261118.md`](https://github.com/bbangert/cairn-rockchip/blob/main/docs/evidence/rk3566-capacity-20261118.md)).
+Up to thirteen cameras with detection. Up to six run YOLOX-s at 640, the
+most the engine's three RKNN contexts held clean on a Home Assistant Green;
+seven to thirteen run YOLOX-tiny at 416, the most two contexts held clean,
+and at three no sample is dropped, though one camera samples 549 of 552; a fourteenth is refused at
+config load ([`docs/evidence/rk3566-capacity-20261126.md`](https://github.com/bbangert/cairn-rockchip/blob/main/docs/evidence/rk3566-capacity-20261126.md)).
 
 ## Prerequisites
 

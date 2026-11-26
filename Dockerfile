@@ -237,9 +237,10 @@ curl -fsSL -o /dist/models/yolox_s.onnx "$base/yolox_s.onnx"
 echo "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063 /dist/models/yolox_s.onnx" | sha256sum -c -
 # The twin of tiny at 640: the tiny release file with its input size
 # rewritten (tools/rknn-export), published beside the rungs. No shipped
-# rung names it: one context holds as many cameras on yolox_s
-# (docs/evidence/rk3566-capacity-20261118.md). It stays baked because a
-# second context may bring the rung back.
+# rung names it: at one context it holds as many cameras as yolox_s
+# (docs/evidence/rk3566-capacity-20261118.md), and it is not measured at
+# more. It stays baked because the engine's three contexts may bring the
+# rung back.
 curl -fsSL -o /dist/models/yolox_tiny_640.onnx \
   https://github.com/bbangert/cairn-nvr/releases/download/models-rk3566-1/yolox_tiny_640.onnx
 echo "6066fa79efe783a554a6f7e13792e0ee9246bc0c7b27d6eddad3f43bdd000a61 /dist/models/yolox_tiny_640.onnx" | sha256sum -c -

@@ -58,9 +58,10 @@ cause. The add-on sets `devicetree: true` for it.
 - Runtime from Rust: the crate opens librknnrt itself with `dlopen`
   (`rknn/sys.rs`, written against the 2.3.2 API); rknpu2-rs is not used. No
   async and no batching — one inference at a time per context. Contexts of
-  one model do overlap (measured, below); Cairn's engine holds one. No
-  perf-mode API equivalent to QNN's, and none was needed: every budget was
-  taken under the governors as found (`schedutil`, `rknpu_ondemand`).
+  one model do overlap (measured, below); Cairn's engine holds three. No
+  perf-mode API equivalent to QNN's. Every budget was taken at the CPU
+  governor as found, `schedutil`, the only governor recorded; it matters
+  (below), and it is the host's to set, not this add-on's.
   `rknn_set_core_mask` is not bound: nothing would set it.
 - Frames in and out are copies. Input goes through `rknn_inputs_set`.
   Importing the scaler's dma-buf instead (`rknn_set_io_mem`) gave
@@ -70,15 +71,22 @@ cause. The add-on sets `devicetree: true` for it.
   cosine 0.05 under every layout tried
   ([`tools/rknn-export/README.md`](../tools/rknn-export/README.md)).
 - Per-board reality:
-  - rk3566 (~1 TOPS): on the HA Green, in the pipeline with one context,
-    INT8 yolox_tiny@416 holds nine cameras at 2 fps (16.57 passes/s carried,
-    46.8 ms a pass) and yolox_s@640 four (7.36, 120.0 ms) —
-    `rk3566-tier1`'s budgets are those camera counts at the loader's
-    1.875/s floor rate, 16.875 and 7.5. A third to just over half
-    of each pass is CPU time in the calling thread; one context leaves the
-    NPU 40-51 % busy at saturation, and a second context of the same model
-    adds 57 % (tiny@416) or 34 % (s@640):
-    [`docs/evidence/rk3566-capacity-20261118.md`](evidence/rk3566-capacity-20261118.md).
+  - rk3566 (~1 TOPS): on the HA Green, in the pipeline at 2 fps, INT8
+    yolox_s@640 holds four cameras with one context, five with two and six
+    with three; yolox_tiny@416 reads every sample on nine with one and
+    thirteen with two. At fourteen with two, and at thirteen, fourteen and
+    sixteen with three, no decoder replaces a sample, so the engine takes
+    every one offered, but up to six cameras' samplers come 2-4 short of 552
+    in the 300 s window. The engine runs three contexts and `rk3566-tier1` budgets six
+    and thirteen at the loader's 1.875/s floor rate, 11.25 and 24.375.
+    A third to just over half of each pass is CPU time in the calling
+    thread, and one context leaves the NPU 40-51 % busy at saturation
+    ([`docs/evidence/rk3566-capacity-20261118.md`](evidence/rk3566-capacity-20261118.md)).
+    The NPU runs one job at a time, so a further context only fills the CPU
+    part of another's pass; at three contexts seven yolox_s cameras missed
+    two 300 s cells under `schedutil` and held one 120 s cell under
+    `performance`
+    ([`docs/evidence/rk3566-capacity-20261126.md`](evidence/rk3566-capacity-20261126.md)).
   - rk3576 (6 TOPS, INT4-capable): not measured. No profile ships for it.
 - **Preprocessing: no Rust crate for RGA** (Rockchip's 2D accelerator for
   resize/color-convert, librga C API, dma_fd zero-copy), so the crate

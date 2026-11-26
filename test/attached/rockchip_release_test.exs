@@ -127,16 +127,16 @@ defmodule Cairn.RockchipReleaseTest do
 
   @rungs [
     {"c61524bca75d6f5df3fd255c8f27b5eaca544c94cbd05d4ce835a82a48733282", "yolox_s_640_i8.rknn",
-     "models/yolox_s.onnx", 640, 7.5},
+     "models/yolox_s.onnx", 640, 11.25},
     {"832df464bc84259d8d612bb7e9d4f6dd8573acb94f9847e051cce4c438c78304", "yolox_tiny_416_i8.rknn",
-     "models/yolox_tiny.onnx", 416, 16.875}
+     "models/yolox_tiny.onnx", 416, 24.375}
   ]
 
   test "rk3566-tier1: two fetched Apache rungs with their twins, and the store's set" do
     assert {:ok, config, []} = Config.from_map(%{"data_dir" => "tmp/cfg_test"})
     profile = config.profiles["rk3566-tier1"]
     assert %{tier: 1, experimental: true, backend: "rknn", decoder: "rkmpp"} = profile
-    assert profile.supported_cameras == 9
+    assert profile.supported_cameras == 13
     url = "https://github.com/bbangert/cairn-nvr/releases/download/models-rk3566-1/"
     assert length(profile.model_ladder) == length(@rungs)
 
