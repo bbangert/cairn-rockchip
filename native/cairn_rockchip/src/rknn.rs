@@ -104,7 +104,7 @@ static RKNN: Descriptor = Descriptor {
 /// duplicate of it where the runtime can make one ([`Backend::sibling`]).
 /// The canary's probe-load makes as many ([`cli_provider`]). Provisional:
 /// the boundary runs choose the value.
-pub const CONTEXTS: usize = 2;
+pub const CONTEXTS: usize = 1;
 
 type Open = fn(&Path, &SessionOptions) -> Result<Box<dyn Backend>>;
 
