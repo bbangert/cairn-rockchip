@@ -266,7 +266,7 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
             }
         }
         s.fed += 1;
-        let full_since = Instant::now();
+        let mut full_since = Instant::now();
         loop {
             let put = Instant::now();
             let result = decoder.put(&data[au.bytes.clone()], pts)?;
@@ -281,7 +281,11 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
             }
             // Sleeping and retrying is allowed only because this is a
             // standalone binary; a NIF's feed drops the AU, as `--fps` does.
+            // A drain can hold a whole `--contexts` run, during which nothing
+            // is fed: that is the probe busy, not the decoder full.
+            let draining = Instant::now();
             s.drain(&mut decoder, args.hold_after)?;
+            full_since += draining.elapsed();
             if full_since.elapsed() > DEADLINE {
                 bail!("MPP stayed full for {DEADLINE:?} at AU {index}");
             }

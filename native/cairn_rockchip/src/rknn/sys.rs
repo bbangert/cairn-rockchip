@@ -9,9 +9,9 @@
 //! the probe's `--infer` is the one caller of either here, and ran both on
 //! the board.
 //!
-//! `rknn_dup_context`'s prototype is from Rockchip's public API description
-//! alone, unconfirmed on the board until the probe's `--context-mode dup`
-//! has run there.
+//! `rknn_dup_context`'s prototype is from Rockchip's public API description;
+//! the probe's `--context-mode dup` is its one caller and ran it on the board
+//! (librknnrt 2.3.2), where the duplicates' outputs matched their parent's.
 //!
 //! The library is opened with `dlopen` at [`Library::load`], never linked: a
 //! build host has no librknnrt, and a board that lacks it should fail on the
