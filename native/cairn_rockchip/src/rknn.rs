@@ -7,8 +7,9 @@
 //! the mapping from tensor attrs to [`ModelIo`], the input check, the loader's
 //! failure paths, the artifact refusals (empty, not a regular file), and the
 //! call sequence, the input descriptor, the output-buffer guard, the input
-//! mems' binding, refusals and teardown, and the probe's [`Contexts`] over
-//! stub entry points. The board run is the proof of the runtime.
+//! mems' binding, refusals and teardown, the engine's slots and the probe's
+//! [`Contexts`] over stub entry points. The board run is the proof of the
+//! runtime.
 //!
 //! The steps [`Backend::run`] is made of, and the input mems
 //! ([`RknnBackend::bind_input`]), are public for the probe's `--infer`, which
@@ -32,8 +33,9 @@ use std::cell::RefCell;
 use std::ffi::{c_int, c_void, OsString};
 use std::io::Read as _;
 use std::os::fd::{BorrowedFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use anyhow::{bail, Context as _, Result};
 use cairn_detect::infer::{
@@ -97,12 +99,40 @@ static RKNN: Descriptor = Descriptor {
     },
 };
 
-/// `--backend rknn` for [`cairn_detect::cli::run`].
+/// How many contexts of the model the engine holds, each a slot a camera's
+/// pass can run on while another's runs; every one after the first is a
+/// duplicate of it where the runtime can make one ([`Backend::sibling`]).
+/// The canary's probe-load makes as many ([`cli_provider`]). Provisional:
+/// the boundary runs choose the value.
+pub const CONTEXTS: usize = 2;
+
+type Open = fn(&Path, &SessionOptions) -> Result<Box<dyn Backend>>;
+
+/// `--backend rknn` for the engine NIFs.
 pub fn provider() -> Provider {
-    Provider {
-        descriptor: &RKNN,
-        open: |model, options| Ok(Box::new(RknnBackend::open(model, options)?)),
-    }
+    engine_provider(|model, options| Ok(Box::new(RknnBackend::open(model, options)?)))
+}
+
+/// The engine's provider over `open`, which the tests point at stubs.
+fn engine_provider(open: Open) -> Provider {
+    Provider::new(&RKNN, open).with_contexts(CONTEXTS)
+}
+
+/// `--backend rknn` for [`cairn_detect::cli::run`], which the canary's
+/// probe-load runs. The binary runs every pass on one context, but its open
+/// first makes the engine's other [`CONTEXTS`] the way the engine does and
+/// drops them: a runtime that fails or crashes making or destroying the
+/// second context must do so in the canary's process, not at the VM's boot.
+/// No pass runs while two are alive, so that is still the VM's to find.
+pub fn cli_provider() -> Provider {
+    Provider::new(&RKNN, |model, options| {
+        cli_open(|| RknnBackend::open(model, options))
+    })
+}
+
+/// [`cli_provider`]'s open over `open`, which the tests point at stubs.
+fn cli_open(open: impl Fn() -> Result<RknnBackend>) -> Result<Box<dyn Backend>> {
+    Ok(Box::new(RknnBackend::rehearsed(CONTEXTS, open)?))
 }
 
 fn check(call: &str, code: c_int) -> Result<()> {
@@ -127,9 +157,10 @@ struct Session {
     mems: Vec<MemPtr>,
     /// The artifact bytes `rknn_init` was handed. rk.py keeps its copy for the
     /// context's lifetime and the API does not say the runtime copies it, so
-    /// this one is freed only after `rknn_destroy`. Empty in every context of
-    /// a [`ContextMode::Dup`] [`Contexts`], which holds the parent's instead.
-    model: Vec<u8>,
+    /// this one is freed only after `rknn_destroy`. A duplicate holds its
+    /// parent's ([`duplicate`]): the API does not say whether it reads them
+    /// either, and shared they outlive whichever of the two goes last.
+    model: Arc<Vec<u8>>,
 }
 
 impl Session {
@@ -204,8 +235,17 @@ struct OutputMeta {
 /// `Send` through `MemPtr`'s `unsafe impl` alone: the context is an
 /// integer handle, and a run's output pointers live in the `RunOutputs` that
 /// borrows it.
+///
+/// Two backends run at once on two contexts, from two threads, with nothing
+/// mutable between them: each has its own context, mems, held input and
+/// output buffers. What a duplicate shares with its parent is the entry
+/// points, which are plain addresses, and the artifact bytes, which nothing
+/// here touches after `rknn_init`. That the runtime runs two contexts at
+/// once is the board's finding (the probe's `--contexts`), not the API's.
 pub struct RknnBackend {
     session: Session,
+    /// For a duplicate's messages, which name the artifact as an open's do.
+    artifact: PathBuf,
     io: ModelIo,
     input_size: InputSize,
     outputs: Vec<OutputMeta>,
@@ -246,6 +286,24 @@ impl Backend for RknnBackend {
         // they live until the outputs are fetched.
         let _input = self.infer()?;
         self.outputs()
+    }
+
+    /// `rknn_dup_context` of this context, for the engine's next slot. On a
+    /// runtime without the entry point `None`, and the engine opens the
+    /// artifact again: a context of its own, as the probe's
+    /// `--context-mode load` makes, at a full load's memory, so that is said.
+    ///
+    /// The engine drops its slots back to front, so every duplicate is
+    /// destroyed before the context it was made from. On the board both
+    /// orders were clean (the probe's `--destroy-order`), but the API does
+    /// not say a duplicate may outlive its parent, and duplicates first is
+    /// the order that asks nothing of it.
+    fn sibling(&mut self) -> Result<Option<Box<dyn Backend>>> {
+        if let Err(missing) = &self.session.library.dup_context {
+            cairn_detect::note!("rknn: {missing}; this context is another load of the artifact");
+            return Ok(None);
+        }
+        Ok(Some(Box::new(duplicate(self)?)))
     }
 }
 
@@ -390,7 +448,7 @@ impl RknnBackend {
             library,
             ctx,
             mems: Vec::new(),
-            model: bytes,
+            model: Arc::new(bytes),
         };
 
         let mut sdk = sys::SdkVersion::zeroed();
@@ -402,6 +460,27 @@ impl RknnBackend {
             c_text(&sdk.drv_version),
         );
         Self::describe(session, model)
+    }
+
+    /// `open`'s backend, after making `contexts - 1` more the way the engine
+    /// makes its slots' backends — by [`Backend::sibling`], or by `open` again
+    /// where that gives none — and dropping them back to front, as the engine
+    /// drops its slots.
+    fn rehearsed(contexts: usize, open: impl Fn() -> Result<Self>) -> Result<Self> {
+        let mut first = open()?;
+        let mut rest: Vec<Box<dyn Backend>> = Vec::new();
+        let made = (1..contexts).try_for_each(|_| {
+            let next = match first.sibling()? {
+                Some(sibling) => sibling,
+                None => Box::new(open()?),
+            };
+            rest.push(next);
+            Ok(())
+        });
+        while let Some(sibling) = rest.pop() {
+            drop(sibling);
+        }
+        made.map(|()| first)
     }
 
     /// The backend over `session`, from what its own context reports.
@@ -425,6 +504,7 @@ impl RknnBackend {
         let (io, input_size, outputs) = model_io(model, &input, &outputs)?;
         Ok(Self {
             session,
+            artifact: model.to_path_buf(),
             io,
             input_size,
             outputs,
@@ -561,9 +641,11 @@ impl RknnBackend {
 
 /// `rknn_dup_context` of `parent`, then its own attrs queried and its own
 /// outputs and mems, as an opened backend's. The runtime is not asked
-/// whether a duplicate needs its parent alive or its parent's artifact
-/// bytes, so [`Contexts`] keeps both as long as the caller chose.
-fn duplicate(parent: &RknnBackend, model: &Path) -> Result<RknnBackend> {
+/// whether a duplicate needs its parent alive, so that is the caller's
+/// destroy order; the artifact bytes it may need are shared with it.
+fn duplicate(parent: &RknnBackend) -> Result<RknnBackend> {
+    let model = &parent.artifact;
+    let duplicating = || format!("duplicating the context of artifact {}", model.display());
     let library = &parent.session.library;
     let dup = *library
         .dup_context
@@ -573,22 +655,21 @@ fn duplicate(parent: &RknnBackend, model: &Path) -> Result<RknnBackend> {
     // writing to it would otherwise lose the handle `parent` destroys.
     let (mut from, mut ctx): (sys::Context, sys::Context) = (parent.session.ctx, 0);
     // SAFETY: two live `Context`s, the first a live context's handle.
-    check("rknn_dup_context", unsafe { dup(&mut from, &mut ctx) })?;
+    check("rknn_dup_context", unsafe { dup(&mut from, &mut ctx) }).with_context(duplicating)?;
+    // Not destroyed twice: the parent's handle is the parent's alone.
+    if ctx == parent.session.ctx {
+        bail!("rknn_dup_context returned its parent's handle");
+    }
     let session = Session {
         library: library.clone(),
         ctx,
         mems: Vec::new(),
-        model: Vec::new(),
+        model: Arc::clone(&parent.session.model),
     };
     if from != parent.session.ctx {
         bail!("rknn_dup_context rewrote its input context");
     }
-    if ctx == from {
-        // Not destroyed twice: the parent's handle is the parent's alone.
-        std::mem::forget(session);
-        bail!("rknn_dup_context returned its parent's handle");
-    }
-    let backend = RknnBackend::describe(session, model)?;
+    let backend = RknnBackend::describe(session, model).with_context(duplicating)?;
     if backend.input_size != parent.input_size || backend.io.outputs != parent.io.outputs {
         bail!("rknn_dup_context's context reports other attrs than its parent");
     }
@@ -613,16 +694,13 @@ pub enum DestroyOrder {
 }
 
 /// Contexts of one artifact for the probe's `--contexts`, destroyed in the
-/// [`DestroyOrder`] asked for. The NIF holds one [`RknnBackend`], never this.
+/// [`DestroyOrder`] asked for. The engine's slots are never this: it makes
+/// them through [`Backend::sibling`] and destroys them duplicates first.
 pub struct Contexts {
     /// Every context; the first is the one `rknn_init` made first, the
     /// parent in [`ContextMode::Dup`].
     backends: Vec<RknnBackend>,
     mode: ContextMode,
-    /// The parent's artifact bytes in [`ContextMode::Dup`], taken out of its
-    /// session so that they outlive every context in either order. Dropped
-    /// after `drop` has destroyed them all.
-    _model: Vec<u8>,
 }
 
 impl Contexts {
@@ -643,22 +721,17 @@ impl Contexts {
         if let (ContextMode::Dup(_), Err(missing)) = (mode, &library.dup_context) {
             bail!("{missing}");
         }
-        let mut first = RknnBackend::with_library(library.clone(), model)?;
-        let bytes = match mode {
-            ContextMode::Load => Vec::new(),
-            ContextMode::Dup(_) => std::mem::take(&mut first.session.model),
-        };
+        let first = RknnBackend::with_library(library.clone(), model)?;
         // Built before any other context, so a failure part-way is torn down
         // in the asked-for order too.
         let mut contexts = Self {
             backends: vec![first],
             mode,
-            _model: bytes,
         };
         for _ in 1..count {
             let next = match mode {
                 ContextMode::Load => RknnBackend::with_library(library.clone(), model)?,
-                ContextMode::Dup(_) => duplicate(&contexts.backends[0], model)?,
+                ContextMode::Dup(_) => duplicate(&contexts.backends[0])?,
             };
             contexts.backends.push(next);
         }
@@ -838,11 +911,13 @@ fn check_input(input: &mut InputTensor, size: InputSize) -> Result<&mut [u8]> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{
         AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst,
     };
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Condvar, Mutex, MutexGuard};
     use std::thread::ThreadId;
+    use std::time::Duration;
 
     /// The descriptor's values, in the form `Cairn.Rockchip.Board.backends/0`
     /// mirrors; [`RKNN`]'s note says which are established and which are a
@@ -859,26 +934,46 @@ pub(crate) mod tests {
         );
     }
 
-    /// The probe binary's `--backend`, as the canary passes it: `rknn` is this
-    /// provider and the core names stay the core's.
+    /// The engine's `--backend` and the probe binary's, as the canary passes
+    /// it: `rknn` is this provider and the core names stay the core's.
     #[test]
     fn the_provider_answers_its_own_name_and_no_other() {
         use cairn_detect::infer::{select, BackendKind, Selected};
 
-        let providers = [provider()];
-        assert!(matches!(
-            select("rknn", &providers),
-            Ok(Selected::Provided(p)) if std::ptr::eq(p.descriptor, &RKNN)
-        ));
-        assert!(matches!(
-            select("ort", &providers),
-            Ok(Selected::Core(BackendKind::Ort))
-        ));
-        let err = match select("tensorrt", &providers) {
-            Ok(_) => panic!("an unknown name selected a backend"),
-            Err(err) => err.to_string(),
-        };
-        assert!(err.ends_with("(rknn, ort, qnn)"), "{err}");
+        for providers in [[provider()], [cli_provider()]] {
+            assert!(matches!(
+                select("rknn", &providers),
+                Ok(Selected::Provided(p)) if std::ptr::eq(p.descriptor, &RKNN)
+            ));
+            assert!(matches!(
+                select("ort", &providers),
+                Ok(Selected::Core(BackendKind::Ort))
+            ));
+            let err = match select("tensorrt", &providers) {
+                Ok(_) => panic!("an unknown name selected a backend"),
+                Err(err) => err.to_string(),
+            };
+            assert!(err.ends_with("(rknn, ort, qnn)"), "{err}");
+        }
+    }
+
+    /// The binary asks core for one backend; its open makes [`CONTEXTS`]
+    /// contexts itself and keeps the first.
+    #[test]
+    fn the_engine_holds_contexts_and_the_binary_rehearses_as_many() {
+        assert_eq!(provider().contexts, CONTEXTS);
+        assert_eq!(cli_provider().contexts, 1);
+
+        let _guard = stubs();
+        let path = std::env::temp_dir().join(format!("rknn-cli-{}.rknn", std::process::id()));
+        std::fs::write(&path, b"stub").unwrap();
+        let kept = cli_open(|| RknnBackend::with_library(stub_library(), &path));
+        std::fs::remove_file(&path).unwrap();
+        let kept = kept.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(called_on("rknn_dup_context").len(), CONTEXTS - 1);
+        assert_eq!(called_on("rknn_destroy").len(), CONTEXTS - 1);
+        drop(kept);
+        assert_eq!(called_on("rknn_destroy").last(), Some(&PARENT));
     }
 
     fn attr(fmt: c_int, type_: c_int, dims: &[u32], name: &[u8]) -> sys::TensorAttr {
@@ -1030,13 +1125,18 @@ pub(crate) mod tests {
     }
 
     // The stubs' counters and knobs are process-global, so every test using
-    // them holds `STUBS` for its whole body.
+    // them holds `STUBS` for its whole body. What a context holds between
+    // calls is in `PER_CTX`, by handle, as a runtime holds it.
     static STUBS: Mutex<()> = Mutex::new(());
     static RELEASED: AtomicUsize = AtomicUsize::new(0);
     static DESTROYED: AtomicUsize = AtomicUsize::new(0);
     static N_INPUT: AtomicU32 = AtomicU32::new(1);
     static N_OUTPUT: AtomicU32 = AtomicU32::new(1);
-    static OUT_BYTES: AtomicU32 = AtomicU32::new(24);
+    /// `[h, w]` of the `[1, h, w, 3]` input every context reports.
+    static INPUT_HW: Mutex<[u32; 2]> = Mutex::new([4, 6]);
+    static OUTPUT_DIMS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    /// The size `rknn_outputs_get` reports, if not its buffer's.
+    static OUT_BYTES: AtomicU32 = AtomicU32::new(0);
     static RUN_CODE: AtomicI32 = AtomicI32::new(0);
     static INITS: AtomicUsize = AtomicUsize::new(0);
     static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -1047,16 +1147,33 @@ pub(crate) mod tests {
     static SET_IO_CODE: AtomicI32 = AtomicI32::new(0);
     static NEXT_FD: AtomicI32 = AtomicI32::new(0);
     static MEM_SHORT: AtomicU32 = AtomicU32::new(0);
-    static OUT_VALUES: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
     /// Per context, for the tests that open more than one: `CALLS` cannot
     /// tell them apart.
     static BY_CTX: Mutex<Vec<(sys::Context, &str)>> = Mutex::new(Vec::new());
     static RUN_THREADS: Mutex<Vec<(sys::Context, ThreadId)>> = Mutex::new(Vec::new());
+    static LOADS: AtomicU64 = AtomicU64::new(0);
     static DUPS: AtomicU64 = AtomicU64::new(0);
     static DUP_CODE: AtomicI32 = AtomicI32::new(0);
-    /// What `stub_init` hands out; a duplicate is numbered from `FIRST_DUP`.
+    /// How many duplicates succeed before `DUP_CODE` applies.
+    static DUP_FAIL_FROM: AtomicU64 = AtomicU64::new(0);
+    static PER_CTX: Mutex<BTreeMap<sys::Context, CtxState>> = Mutex::new(BTreeMap::new());
+    /// How many `rknn_run`s must be inside at once before any returns; 0 for
+    /// none. A run that waits `GATE_BOUND` without seeing them all fails.
+    static RUN_GATE: AtomicUsize = AtomicUsize::new(0);
+    static ARRIVED: Mutex<usize> = Mutex::new(0);
+    static ARRIVAL: Condvar = Condvar::new();
+    const GATE_BOUND: Duration = Duration::from_secs(10);
+    /// What `stub_init` hands out first, the next load one more; a duplicate
+    /// is numbered from `FIRST_DUP`.
     pub(crate) const PARENT: sys::Context = 7;
     pub(crate) const FIRST_DUP: sys::Context = 1000;
+
+    /// One context's input and the output buffer it lent, if one is out.
+    #[derive(Default)]
+    struct CtxState {
+        input: Vec<u8>,
+        out: Option<Box<[f32]>>,
+    }
 
     struct SetInput {
         n_inputs: u32,
@@ -1087,7 +1204,9 @@ pub(crate) mod tests {
         *SET_INPUT.lock().unwrap() = None;
         N_INPUT.store(1, SeqCst);
         N_OUTPUT.store(1, SeqCst);
-        OUT_BYTES.store(24, SeqCst);
+        *INPUT_HW.lock().unwrap() = [4, 6];
+        *OUTPUT_DIMS.lock().unwrap() = vec![1, 2, 3];
+        OUT_BYTES.store(0, SeqCst);
         RUN_CODE.store(0, SeqCst);
         NATIVE_W_STRIDE.store(0, SeqCst);
         NATIVE_SIZE.store(72, SeqCst);
@@ -1097,8 +1216,13 @@ pub(crate) mod tests {
         MEM_SHORT.store(0, SeqCst);
         BY_CTX.lock().unwrap().clear();
         RUN_THREADS.lock().unwrap().clear();
+        LOADS.store(0, SeqCst);
         DUPS.store(0, SeqCst);
         DUP_CODE.store(0, SeqCst);
+        DUP_FAIL_FROM.store(0, SeqCst);
+        PER_CTX.lock().unwrap().clear();
+        RUN_GATE.store(0, SeqCst);
+        *ARRIVED.lock().unwrap() = 0;
         guard
     }
 
@@ -1111,7 +1235,7 @@ pub(crate) mod tests {
     ) -> c_int {
         INITS.fetch_add(1, SeqCst);
         // SAFETY: `with_library` passes the address of a live `Context`.
-        unsafe { *ctx = PARENT };
+        unsafe { *ctx = PARENT + LOADS.fetch_add(1, SeqCst) };
         0
     }
 
@@ -1119,7 +1243,11 @@ pub(crate) mod tests {
         // SAFETY: `duplicate` passes two live `Context`s.
         let from = unsafe { *from };
         on(from, "rknn_dup_context");
-        let code = DUP_CODE.load(SeqCst);
+        let code = if DUPS.load(SeqCst) < DUP_FAIL_FROM.load(SeqCst) {
+            0
+        } else {
+            DUP_CODE.load(SeqCst)
+        };
         if code == 0 {
             // SAFETY: as above.
             unsafe { *to = FIRST_DUP + DUPS.fetch_add(1, SeqCst) };
@@ -1157,8 +1285,13 @@ pub(crate) mod tests {
                         n_output: N_OUTPUT.load(SeqCst),
                     };
                 }
-                sys::QUERY_INPUT_ATTR => *info.cast() = input(&[1, 4, 6, 3]),
-                sys::QUERY_OUTPUT_ATTR => *info.cast() = output(b"output\0", &[1, 2, 3]),
+                sys::QUERY_INPUT_ATTR => {
+                    let [h, w] = *INPUT_HW.lock().unwrap();
+                    *info.cast() = input(&[1, h, w, 3]);
+                }
+                sys::QUERY_OUTPUT_ATTR => {
+                    *info.cast() = output(b"output\0", &OUTPUT_DIMS.lock().unwrap());
+                }
                 sys::QUERY_NATIVE_INPUT_ATTR => {
                     let mut native = input(&[1, 4, 6, 3]);
                     native.w_stride = NATIVE_W_STRIDE.load(SeqCst);
@@ -1183,6 +1316,7 @@ pub(crate) mod tests {
         // SAFETY: its `buf` is `size` bytes the backend holds past the call.
         let bytes =
             unsafe { std::slice::from_raw_parts(input.buf.cast::<u8>(), input.size as usize) };
+        PER_CTX.lock().unwrap().entry(ctx).or_default().input = bytes.to_vec();
         *SET_INPUT.lock().unwrap() = Some(SetInput {
             n_inputs,
             index: input.index,
@@ -1202,6 +1336,18 @@ pub(crate) mod tests {
             .unwrap()
             .push((ctx, std::thread::current().id()));
         call("rknn_run");
+        let gate = RUN_GATE.load(SeqCst);
+        if gate > 0 {
+            let mut arrived = ARRIVED.lock().unwrap();
+            *arrived += 1;
+            ARRIVAL.notify_all();
+            let (_arrived, waited) = ARRIVAL
+                .wait_timeout_while(arrived, GATE_BOUND, |n| *n < gate)
+                .unwrap();
+            if waited.timed_out() {
+                return -2;
+            }
+        }
         RUN_CODE.load(SeqCst)
     }
 
@@ -1213,11 +1359,26 @@ pub(crate) mod tests {
     ) -> c_int {
         on(ctx, "rknn_outputs_get");
         call("rknn_outputs_get");
-        // SAFETY: `outputs` passes one live `Output` for the one output reported.
-        unsafe {
-            (*outs).buf = ptr::from_ref(&OUT_VALUES).cast_mut().cast();
-            (*outs).size = OUT_BYTES.load(SeqCst);
+        // Byte i of this context's last input as output value i, 0 past its
+        // end: what a context returns is its own input's, and nobody else's.
+        let elems: u32 = OUTPUT_DIMS.lock().unwrap().iter().product();
+        let mut per_ctx = PER_CTX.lock().unwrap();
+        let state = per_ctx.entry(ctx).or_default();
+        let mut values: Box<[f32]> = vec![0.0; elems as usize].into();
+        for (v, &b) in values.iter_mut().zip(&state.input) {
+            *v = f32::from(b);
         }
+        let given = OUT_BYTES.load(SeqCst);
+        // SAFETY: `outputs` passes one live `Output` for the one output
+        // reported; the buffer is boxed in `PER_CTX` until its release.
+        unsafe {
+            (*outs).buf = values.as_mut_ptr().cast();
+            (*outs).size = if given == 0 { elems * 4 } else { given };
+        }
+        if state.out.is_some() {
+            return -1;
+        }
+        state.out = Some(values);
         0
     }
 
@@ -1228,6 +1389,16 @@ pub(crate) mod tests {
     ) -> c_int {
         on(ctx, "rknn_outputs_release");
         call("rknn_outputs_release");
+        // Counted only when this context had lent buffers, so a release on
+        // the wrong context shows in the count.
+        let lent = PER_CTX
+            .lock()
+            .unwrap()
+            .get_mut(&ctx)
+            .and_then(|s| s.out.take());
+        if lent.is_none() {
+            return -9;
+        }
         RELEASED.fetch_add(1, SeqCst);
         0
     }
@@ -1355,7 +1526,7 @@ pub(crate) mod tests {
         assert_eq!(calls(), ["rknn_inputs_set", "rknn_run", "rknn_outputs_get"]);
         let raw = outputs.get("output").unwrap();
         assert_eq!(raw.dims, [1, 2, 3]);
-        assert_eq!(raw.values, OUT_VALUES);
+        assert_eq!(raw.values, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
         assert!(err(outputs.get("missing")).contains("no output \"missing\""));
         drop(outputs);
         assert_eq!(RELEASED.load(SeqCst), 1);
@@ -1595,9 +1766,14 @@ pub(crate) mod tests {
         for ctx in [PARENT, FIRST_DUP, FIRST_DUP + 1] {
             assert!(queried.contains(&ctx), "{ctx} was not queried: {queried:?}");
         }
-        // The parent's bytes, held by the set, not by the parent.
-        assert!(contexts.first().session.model.is_empty());
-        assert_eq!(contexts._model, b"stub");
+        // The parent's bytes, shared by every duplicate.
+        let [first, rest @ ..] = contexts.all() else {
+            panic!("no contexts")
+        };
+        assert_eq!(*first.session.model, b"stub");
+        for dup in rest {
+            assert!(Arc::ptr_eq(&first.session.model, &dup.session.model));
+        }
 
         let [_, a, b] = contexts.all() else {
             panic!("not three contexts")
@@ -1622,6 +1798,7 @@ pub(crate) mod tests {
             (DestroyOrder::ParentFirst, [PARENT, dups[0], dups[1]]),
         ] {
             BY_CTX.lock().unwrap().clear();
+            LOADS.store(0, SeqCst);
             DUPS.store(0, SeqCst);
             drop(open_contexts("order", 3, ContextMode::Dup(order)).unwrap());
             assert_eq!(called_on("rknn_destroy"), expected, "{order:?}");
@@ -1655,5 +1832,182 @@ pub(crate) mod tests {
             "{msg}"
         );
         assert_eq!(called_on("rknn_destroy"), [PARENT]);
+    }
+
+    fn without_dup() -> sys::Library {
+        sys::Library {
+            dup_context: Err("the RKNN runtime stub has no rknn_dup_context".into()),
+            ..stub_library()
+        }
+    }
+
+    fn stub_open(model: &Path, _: &SessionOptions) -> Result<Box<dyn Backend>> {
+        Ok(Box::new(RknnBackend::with_library(stub_library(), model)?))
+    }
+
+    fn stub_open_without_dup(model: &Path, _: &SessionOptions) -> Result<Box<dyn Backend>> {
+        Ok(Box::new(RknnBackend::with_library(without_dup(), model)?))
+    }
+
+    fn values(outputs: Result<Box<dyn Tensors + '_>>) -> Vec<f32> {
+        outputs.unwrap().get("output").unwrap().values.to_vec()
+    }
+
+    fn frame_from(first: u8) -> InputTensor {
+        let bytes = (0..72).map(|i| first.wrapping_add(i)).collect();
+        InputTensor::new(
+            InputSize { w: 6, h: 4 },
+            TensorLayout::Nhwc,
+            TensorValues::U8(bytes),
+        )
+    }
+
+    #[test]
+    fn a_sibling_is_a_duplicate_that_serves_what_its_parent_does() {
+        let _guard = stubs();
+        let mut parent = open_stub("sibling").unwrap();
+        let mut dup = parent.sibling().unwrap().expect("no duplicate");
+        assert_eq!(INITS.load(SeqCst), 1);
+        assert_eq!(called_on("rknn_dup_context"), [PARENT]);
+        assert_eq!(dup.io().outputs, parent.io().outputs);
+        assert_eq!(
+            dup.io().declared_input_size,
+            parent.io().declared_input_size
+        );
+        let ours = values(parent.run(frame()));
+        assert_eq!(values(dup.run(frame())), ours);
+        assert_eq!(called_on("rknn_run"), [PARENT, FIRST_DUP]);
+        drop(dup);
+        assert_eq!(called_on("rknn_destroy"), [FIRST_DUP]);
+        assert_eq!(values(parent.run(frame())), ours, "the parent outlives it");
+    }
+
+    /// The stub's run waits until both are inside it, so a backend that
+    /// serialised its contexts would time out here, not pass slowly.
+    #[test]
+    fn a_duplicate_and_its_parent_run_at_once_each_on_its_own_input() {
+        let _guard = stubs();
+        let mut parent = open_stub("overlap").unwrap();
+        let mut dup = parent.sibling().unwrap().expect("no duplicate");
+        RUN_GATE.store(2, SeqCst);
+        let (ours, theirs) = std::thread::scope(|scope| {
+            let ours = scope.spawn(|| values(parent.run(frame_from(10))));
+            let theirs = scope.spawn(|| values(dup.run(frame_from(20))));
+            (ours.join().unwrap(), theirs.join().unwrap())
+        });
+        assert_eq!(ours, [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        assert_eq!(theirs, [20.0, 21.0, 22.0, 23.0, 24.0, 25.0]);
+        assert_eq!(RELEASED.load(SeqCst), 2);
+    }
+
+    /// A yolox-shaped artifact, for the detector the engine opens on each
+    /// slot.
+    fn engine(tag: &str, provider: &Provider) -> cairn_ort::Result<cairn_ort::Engine> {
+        *INPUT_HW.lock().unwrap() = [64, 96];
+        *OUTPUT_DIMS.lock().unwrap() = vec![1, 126, 85];
+        let path = std::env::temp_dir().join(format!("rknn-eng-{}-{tag}.rknn", std::process::id()));
+        std::fs::write(&path, b"stub").unwrap();
+        let config = cairn_ort::RawInitConfig {
+            model: path.to_string_lossy().into_owned(),
+            backend: "rknn".into(),
+            model_profile: None,
+            input_size: None,
+            labels: None,
+            allow_label_mismatch: false,
+            embedder_model: None,
+            qnn: cairn_ort::RawQnnOptions {
+                library: None,
+                soc_model: None,
+                htp_arch: None,
+                performance_mode: None,
+                vtcm_mb: None,
+            },
+        };
+        let opened = config
+            .resolve()
+            .and_then(|config| cairn_ort::Engine::with_provider(config, provider));
+        std::fs::remove_file(&path).unwrap();
+        opened
+    }
+
+    #[test]
+    fn the_engine_duplicates_its_first_context_and_destroys_duplicates_first() {
+        let _guard = stubs();
+        let engine = match engine("slots", &engine_provider(stub_open).with_contexts(3)) {
+            Ok(engine) => engine,
+            Err(error) => panic!("{error:?}"),
+        };
+        assert_eq!(INITS.load(SeqCst), 1);
+        assert_eq!(called_on("rknn_dup_context"), [PARENT, PARENT]);
+        drop(engine);
+        assert_eq!(
+            called_on("rknn_destroy"),
+            [FIRST_DUP + 1, FIRST_DUP, PARENT]
+        );
+    }
+
+    /// Sound because a loaded context is the probe's `--context-mode load`,
+    /// which needs nothing of any other.
+    #[test]
+    fn without_rknn_dup_context_the_engine_loads_every_context() {
+        let _guard = stubs();
+        let provider = engine_provider(stub_open_without_dup).with_contexts(3);
+        drop(engine("nodup", &provider).unwrap_or_else(|e| panic!("{e:?}")));
+        assert_eq!(INITS.load(SeqCst), 3);
+        assert!(called_on("rknn_dup_context").is_empty());
+        assert_eq!(called_on("rknn_destroy"), [PARENT + 2, PARENT + 1, PARENT]);
+    }
+
+    #[test]
+    fn a_failed_duplicate_refuses_the_engine_and_destroys_what_opened() {
+        let _guard = stubs();
+        DUP_FAIL_FROM.store(1, SeqCst);
+        DUP_CODE.store(-5, SeqCst);
+        let error = match engine("dupfail", &engine_provider(stub_open).with_contexts(3)) {
+            Ok(_) => panic!("the engine opened"),
+            Err(error) => error,
+        };
+        assert_eq!(error.reason(), "model_load");
+        let msg = error.message();
+        assert!(
+            msg.contains("duplicating the context of artifact")
+                && msg.contains("rknn_dup_context returned -5 (RKNN_ERR_PARAM_INVALID)"),
+            "{msg}"
+        );
+        assert_eq!(called_on("rknn_destroy"), [FIRST_DUP, PARENT]);
+    }
+
+    fn rehearse(tag: &str, library: fn() -> sys::Library) -> Result<RknnBackend> {
+        let path = std::env::temp_dir().join(format!("rknn-reh-{}-{tag}.rknn", std::process::id()));
+        std::fs::write(&path, b"stub").unwrap();
+        let rehearsed = RknnBackend::rehearsed(3, || RknnBackend::with_library(library(), &path));
+        std::fs::remove_file(&path).unwrap();
+        rehearsed
+    }
+
+    /// The binary's open: the engine's contexts made and gone, back to
+    /// front, before it serves on the first.
+    #[test]
+    fn the_binary_rehearses_the_engine_open_and_keeps_the_first() {
+        let _guard = stubs();
+        let mut first = rehearse("dup", stub_library).unwrap();
+        assert_eq!(called_on("rknn_destroy"), [FIRST_DUP + 1, FIRST_DUP]);
+        assert_eq!(values(first.run(frame())).len(), 6);
+        drop(first);
+        assert_eq!(called_on("rknn_destroy").last(), Some(&PARENT));
+
+        BY_CTX.lock().unwrap().clear();
+        LOADS.store(0, SeqCst);
+        drop(rehearse("nodup", without_dup).unwrap());
+        assert_eq!(called_on("rknn_destroy"), [PARENT + 2, PARENT + 1, PARENT]);
+
+        BY_CTX.lock().unwrap().clear();
+        LOADS.store(0, SeqCst);
+        DUPS.store(0, SeqCst);
+        DUP_FAIL_FROM.store(1, SeqCst);
+        DUP_CODE.store(-1, SeqCst);
+        let msg = err(rehearse("dupfail", stub_library));
+        assert!(msg.contains("rknn_dup_context returned -1"), "{msg}");
+        assert_eq!(called_on("rknn_destroy"), [FIRST_DUP, PARENT]);
     }
 }

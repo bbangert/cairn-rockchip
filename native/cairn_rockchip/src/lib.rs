@@ -35,8 +35,10 @@ use cairn_ort::{
 };
 use rustler::{Atom, Binary, Env, ResourceArc};
 
-/// Load librknnrt and the artifact, once per VM. DirtyCpu, as `CairnOrt`'s:
-/// `rknn_init` builds the NPU context.
+/// Load librknnrt and the artifact, once per VM, as [`rknn::CONTEXTS`]
+/// contexts. DirtyCpu, as `CairnOrt`'s: `rknn_init` builds the NPU context,
+/// and the rest are duplicates of it, or further loads on a runtime that
+/// cannot duplicate.
 ///
 /// `library` is the VM's `CAIRN_RKNN_LIBRARY`, which this library cannot read
 /// itself ([`rknn::with_runtime`]); `nil` is the loader's search path. The one

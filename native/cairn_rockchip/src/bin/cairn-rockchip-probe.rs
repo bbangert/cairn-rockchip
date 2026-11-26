@@ -12,5 +12,5 @@ fn main() -> std::process::ExitCode {
     if args.first().is_some_and(|arg| arg == "--rk-probe") {
         return cairn_rockchip::probe::run(&args);
     }
-    cairn_detect::cli::run(&[cairn_rockchip::rknn::provider()])
+    cairn_detect::cli::run(&[cairn_rockchip::rknn::cli_provider()])
 }
