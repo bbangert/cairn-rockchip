@@ -101,17 +101,20 @@ measurements.
 
 ## Sizing
 
-**RKNN is sequential per context, and the engine holds one.** librknnrt
+**RKNN is sequential per context, and the engine holds three.** librknnrt
 documents no async submission and no batching: one inference at a time per
-context. Nothing in a profile can say otherwise — there is no batch size and
-no concurrency field — so this is a sizing fact, not a setting. Further
-contexts of one model do overlap on the RK3566
-([`docs/evidence/rk3566-capacity-20261118.md`](evidence/rk3566-capacity-20261118.md)),
-but that is not something a profile can ask for: if an rk3566 budget looks
-achievable only by overlapping inferences, it is not achievable.
+context. Contexts of one model overlap on the RK3566, so the engine holds
+three and passes from different cameras run on whichever is free; the
+count is the board's (`CONTEXTS` in `native/cairn_rockchip/src/rknn.rs`),
+and nothing in a profile can change it — there is no batch size and no
+concurrency field. `rk3566-tier1`'s yolox_s budget is measured at three
+contexts and its yolox_tiny budget at two; at three no decoder dropped a
+sample at that count
+([`docs/evidence/rk3566-capacity-20261126.md`](evidence/rk3566-capacity-20261126.md)).
+Measure a budget for your own rknn ladder at the engine's count.
 
-A measurement records the cpufreq governor it ran under; RK3566's budgets
-were taken under the governors as found (`schedutil`, `rknpu_ondemand`).
+A measurement records the CPU governor it ran under; RK3566's budgets were
+taken at the CPU governor as found, `schedutil`.
 
 ## `rk3566-tier1`
 
@@ -120,7 +123,7 @@ file:
 
 | backend | rate | stages | notes |
 |---|---|---|---|
-| `rknn` | derived per rung | none (tier 1) | two fetched Apache YOLOX rungs with baked CPU twins, `decoder: rkmpp`, claim 9 cameras; both budgets boundary-measured ([`docs/evidence/rk3566-capacity-20261118.md`](evidence/rk3566-capacity-20261118.md)) |
+| `rknn` | derived per rung | none (tier 1) | two fetched Apache YOLOX rungs with baked CPU twins, `decoder: rkmpp`, claim 13 cameras; boundary-measured, yolox_s at three contexts and yolox_tiny at two ([`docs/evidence/rk3566-capacity-20261126.md`](evidence/rk3566-capacity-20261126.md)) |
 
 It is `experimental: true` because `rknn` has not proven out in soak: a group
 naming it needs your `allow_experimental: true`. For a ladder file of your

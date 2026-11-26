@@ -4,7 +4,7 @@ The Rockchip board for [Cairn](https://github.com/bbangert/cairn-nvr): MPP
 hardware decode and RGA scaling for `decoder: rkmpp`, and the RKNN engine for
 `backend: rknn`, as the OTP application `cairn_rockchip` and its NIF. Measured
 on the RK3566 of the HA Green; the profile it ships, `rk3566-tier1`, carries
-that board's budgets (`docs/evidence/rk3566-capacity-20261118.md`).
+that board's budgets (`docs/evidence/rk3566-capacity-20261126.md`).
 
 What the board adds to a profile — `backend: rknn`, `decoder: rkmpp`, CPU
 twins, which families convert — is [docs/profiles.md](docs/profiles.md); the

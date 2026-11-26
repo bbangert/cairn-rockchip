@@ -4,21 +4,22 @@
 # is usable once the file hashes to its `sha256:`. While one is missing, a
 # config whose cameras run this profile is refused, naming it.
 #
-# Budgets are boundary runs on the board in the release's own VM, Core and
-# Matter running, gate open at 2 fps: the most cameras that each kept
-# their full rate through two 300 s cells, times the 1.875/s floor rate
-# (docs/evidence/rk3566-capacity-20261118.md, whose cell names these are).
-#
-# One engine is one context, and these budgets are one context's. Two
-# contexts of one model carried more (+57 % on the 416 rung, +34 % on
-# yolox_s), but the engine has no pool.
+# Budgets are boundary runs on the board in the release's own VM, gate
+# open at 2 fps: the most cameras that each kept their full rate through two
+# 300 s cells, times the 1.875/s floor rate. yolox_s's count is read at the
+# engine's three contexts (rknn.rs `CONTEXTS`); the 416 rung's is read at
+# two, and three take every sample from it
+# (docs/evidence/rk3566-capacity-20261126.md, whose cell names these are).
+# They are taken at the CPU governor as found, `schedutil`; this add-on sets
+# none.
 #
 # Two different models loaded together ran in lockstep in the bring-up
 # benches, each at the same pass rate. No rung is budgeted for that: a
 # config whose cameras ask for different models is refused.
 #
-# yolox_tiny at 640 is not a rung: it held four cameras and missed five,
-# the same as yolox_s below, so no fleet would select it.
+# yolox_tiny at 640 is not a rung: at one context it holds four cameras and
+# misses five, as yolox_s does at one, so no fleet would select it
+# (docs/evidence/rk3566-capacity-20261118.md). It is not measured at more.
 #
 # experimental: true because rknn has not soaked (D-P10); a group naming
 # this profile also needs `allow_experimental: true`. AGPL pack rungs are
@@ -28,24 +29,29 @@ tier: 1
 backend: rknn
 model_profile: yolox
 model_ladder:
-  # Best accuracy (40.5 paper mAP). measured: 4 cameras clean
-  # (b-s640-r1-4cam-1794965572, b-s640-r2-4cam-1794965898), 5 miss.
+  # Best accuracy (40.5 paper mAP). measured: 6 cameras clean
+  # (b-k3-s640-r1-6cam-1795676617, b-k3-s640-r2-6cam-1795676943), 7 miss
+  # (b-k3-s640-r1-7cam-1795677269, b-k3-s640-r2-7cam-1795677595).
   - sha256: c61524bca75d6f5df3fd255c8f27b5eaca544c94cbd05d4ce835a82a48733282
     url: https://github.com/bbangert/cairn-nvr/releases/download/models-rk3566-1/yolox_s_640_i8.rknn
     model:
       onnx: models/yolox_s.onnx
     input_size: 640
-    engine_budget: 7.5
-  # measured: 9 cameras clean (b-t416-r1-9cam-1794962358,
-  # b-t416-r2-9cam-1794962684), 10 miss.
+    engine_budget: 11.25
+  # measured: 13 cameras, every one at 552 at two contexts
+  # (b-k2-t416-r1-13cam-1795678558, b-k2-t416-r2-13cam-1795678884). At three
+  # (b-k3-t416-r1-13cam-1795679847, b-k3-t416-r2-13cam-1795680172) no
+  # decoder replaced a sample, so the engine took every one offered; one
+  # camera's sampler took 549 of 552 in each window. 14 and 16 also replace
+  # none, with up to six cameras sampling 548-550; 13 is the most two contexts read clean.
   - sha256: 832df464bc84259d8d612bb7e9d4f6dd8573acb94f9847e051cce4c438c78304
     url: https://github.com/bbangert/cairn-nvr/releases/download/models-rk3566-1/yolox_tiny_416_i8.rknn
     model:
       onnx: models/yolox_tiny.onnx
     input_size: 416
-    engine_budget: 16.875
-# The 416 rung's nine measured cameras.
-supported_cameras: 9
+    engine_budget: 24.375
+# The 416 rung's thirteen measured cameras.
+supported_cameras: 13
 # MPP decode and RGA scale. Named because a named decoder is a requirement:
 # without the device nodes detection stops and says so, rather than
 # decoding in software on the cores the rest of the pipeline needs.

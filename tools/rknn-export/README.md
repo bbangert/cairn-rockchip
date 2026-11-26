@@ -174,8 +174,9 @@ as a gap.
 - **yolox_tiny at 640 passed its bar**, set before the run: person recall
   ≥ 0.85 overall and no more than 0.05 below the 416 rung. It scored 0.94
   against 0.87, with the same output cosine (0.969). It is built and
-  published but is not an `rk3566-tier1` rung: on the board it held no more
-  cameras than yolox_s (`docs/evidence/rk3566-capacity-20261118.md`).
+  published but is not an `rk3566-tier1` rung: on the board, with one
+  context, it held no more cameras than yolox_s
+  (`docs/evidence/rk3566-capacity-20261118.md`).
 - yolo11n loses stride 32 for non-person classes (any-class recall 0.42
   there); yolo11s loses a quarter of person cells at every stride it has
   them.
