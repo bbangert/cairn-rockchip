@@ -6,7 +6,7 @@ defmodule Cairn.Rockchip.MixProject do
   def project do
     [
       app: :cairn_rockchip,
-      version: "0.1.0",
+      version: "0.1.1",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       cairn_board: Cairn.Rockchip.Board,
