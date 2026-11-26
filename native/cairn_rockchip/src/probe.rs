@@ -28,12 +28,14 @@ const USAGE: &str = "usage: cairn-rockchip-probe --rk-probe <annexb-file> \
 [--skip-aus N] [--hold-after N] [--streams N] [--fps F] \
 [--scale WxH [--resize letterbox|stretch] [--pad N] [--every N] [--dump PATH] \
 [--infer MODEL.rknn [--input copy|fd|mem] [--sync none|dmabuf|to-device|from-device] \
-[--order rgb|bgr] [--slots N] [--samples N]]]";
+[--order rgb|bgr] [--slots N] [--samples N] \
+[--contexts N [--context-mode load|dup [--destroy-order dup-first|parent-first]]]]]";
 
 /// Output is at most 34 lines whatever the input: the open line, up to
 /// [`INFO_CHANGE_LINES`], one line per stream and the total, plus
-/// `--scale`'s two or `--infer`'s two (each runs one stream) — or, on an
-/// error, the lines before it and the error line. Under `--scale` librga
+/// `--scale`'s two or `--infer`'s two, or with `--contexts N` N + 6 (each
+/// runs one stream, and N is at most 8) — or, on an error, the lines before
+/// it and the error line. Under `--scale` librga
 /// adds lines of its own, not JSON (see [`crate::rga`]), and under `--infer`
 /// librknnrt may too.
 const MAX_STREAMS: usize = 16;
@@ -264,7 +266,7 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
             }
         }
         s.fed += 1;
-        let full_since = Instant::now();
+        let mut full_since = Instant::now();
         loop {
             let put = Instant::now();
             let result = decoder.put(&data[au.bytes.clone()], pts)?;
@@ -279,7 +281,11 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
             }
             // Sleeping and retrying is allowed only because this is a
             // standalone binary; a NIF's feed drops the AU, as `--fps` does.
+            // A drain can hold a whole `--contexts` run, during which nothing
+            // is fed: that is the probe busy, not the decoder full.
+            let draining = Instant::now();
             s.drain(&mut decoder, args.hold_after)?;
+            full_since += draining.elapsed();
             if full_since.elapsed() > DEADLINE {
                 bail!("MPP stayed full for {DEADLINE:?} at AU {index}");
             }
@@ -287,10 +293,13 @@ fn decode_stream(data: &[u8], aus: &[Au], args: &Args) -> Result<(Value, Vec<Val
         }
         s.drain(&mut decoder, args.hold_after)?;
     }
-    let finishing = Instant::now();
+    let mut finishing = Instant::now();
     while !decoder.eos() && finishing.elapsed() < DEADLINE {
         decoder.finish()?;
+        // As in the feed loop: a `--contexts` run is not the wait for EOS.
+        let draining = Instant::now();
         s.drain(&mut decoder, args.hold_after)?;
+        finishing += draining.elapsed();
         thread::sleep(RETRY_SLEEP);
     }
     let stats = decoder.stats();
@@ -421,7 +430,7 @@ fn probe(args: &Args) -> Result<()> {
 mod tests {
     use super::*;
     use crate::rga::ChannelOrder;
-    use crate::rknn::MemSync;
+    use crate::rknn::{ContextMode, DestroyOrder, MemSync};
     use cairn_detect::infer::{InputSize, ResizePolicy};
 
     /// A NAL with a 4-byte start code: header byte, then payload.
@@ -528,6 +537,8 @@ mod tests {
             order: ChannelOrder::Rgb,
             slots: 2,
             samples: 200,
+            contexts: 1,
+            mode: ContextMode::Load,
         };
         assert_eq!(infer("--infer m"), Ok(Some(defaults.clone())));
         assert_eq!(infer(""), Ok(None));
@@ -539,6 +550,8 @@ mod tests {
             order: ChannelOrder::Bgr,
             slots: 4,
             samples: 50,
+            contexts: 1,
+            mode: ContextMode::Load,
         };
         assert_eq!(infer(given), Ok(Some(expected)));
         let mem = infer("--infer m --input mem --sync dmabuf")
@@ -572,9 +585,45 @@ mod tests {
             ("--infer m --dump s.ppm", "--dump is --scale's alone"),
             ("--infer m --streams 2", "one stream"),
             ("--infer", "needs a value"),
+            ("--contexts 2", "--contexts needs --infer"),
+            ("--infer m --contexts 0", "--contexts is 1 to 8"),
+            ("--infer m --contexts 9", "--contexts is 1 to 8"),
+            (
+                "--infer m --contexts 2 --input fd",
+                "above 1 runs --input copy",
+            ),
+            (
+                "--infer m --contexts 2 --context-mode share",
+                "not one of load, dup",
+            ),
+            (
+                "--infer m --context-mode dup",
+                "dup needs --contexts 2 or more",
+            ),
+            (
+                "--infer m --contexts 2 --destroy-order dup-first",
+                "--destroy-order needs --context-mode dup",
+            ),
+            (
+                "--infer m --contexts 2 --context-mode dup --destroy-order last",
+                "not one of dup-first, parent-first",
+            ),
         ] {
             assert!(infer(bad).unwrap_err().contains(says), "{bad:?}");
         }
+        let contexts = |rest| infer(rest).unwrap().unwrap();
+        let one = contexts("--infer m --contexts 1 --context-mode load");
+        assert_eq!((one.contexts, one.mode), (1, ContextMode::Load));
+        let load = contexts("--infer m --contexts 4 --samples 30");
+        assert_eq!(
+            (load.contexts, load.mode, load.samples),
+            (4, ContextMode::Load, 30)
+        );
+        let dup = contexts("--infer m --contexts 2 --context-mode dup");
+        assert_eq!(dup.mode, ContextMode::Dup(DestroyOrder::DupFirst));
+        let parent =
+            contexts("--infer m --contexts 8 --destroy-order parent-first --context-mode dup");
+        assert_eq!(parent.mode, ContextMode::Dup(DestroyOrder::ParentFirst));
         let unscaled = args(&["--rk-probe", "f", "--infer", "m"]).unwrap_err();
         assert!(unscaled.contains("--infer needs --scale"), "{unscaled}");
     }
