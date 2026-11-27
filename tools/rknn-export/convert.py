@@ -24,6 +24,8 @@ per-tensor ranges build does not report (with --hybrid, which only build
 does, step 1 runs again beside it): NAME.quantization.cfg and
 NAME.ranges.json (each output's scale, zero point and representable range,
 clipped box tensors, score ceilings, narrow Concat inputs, widest tensors).
+With --hybrid those describe the graph before auto_hybrid's float16 moves
+(`plan` says so) and NAME.json takes no `outputs` or `flags` from them.
 --analysis N runs accuracy_analysis on N of the frames calibration used (the
 --calib-count prefix), one call each (a call reads one frame per model
 input), into NAME.analysis.json; the ~0.75 GB of tensor dumps per frame are
@@ -294,8 +296,8 @@ def step1(r, a, dataset):
 
 def ranges(a, res, dataset):
     """Without NAME.quantization.cfg from the build (an --hybrid build is made by build()), calibrate again
-    through step 1 in its own instance; its scales equal the build's (v9-t normal, 2026-11-27: cls0 0.0037029 both,
-    read off the simulator's output steps)."""
+    through step 1 in its own instance; without auto_hybrid its scales equal the build's (v9-t normal, 2026-11-27:
+    cls0 0.0037029 both, read off the simulator's output steps)."""
     if not os.path.exists(f"{a.name}.quantization.cfg"):
         from rknn.api import RKNN
         r2 = RKNN(verbose=False)
@@ -320,7 +322,11 @@ def ranges(a, res, dataset):
            "clipped_any_output": quant_report.clipped(cfg, names),
            "score_ceiling": [o for o in outs if "max_score" in o and o["max_score"] < 1.0],
            "narrow_concat": narrow, "unmatched_concats": unmatched, "widest": quant_report.widest(cfg)}
+    # step 1 knows nothing of the layers auto_hybrid moved to float16, so under --hybrid this is the plan
+    # before those moves and none of it is recorded as the exported model's
+    if a.hybrid: rep = {"plan": "before auto_hybrid", **rep}
     json.dump(rep, open(f"{a.name}.ranges.json", "w"), indent=1)
+    if a.hybrid: return
     res["outputs"] = outs
     res["flags"] = {k: len(rep[k]) for k in ("clipped_box", "score_ceiling", "narrow_concat")}
 

@@ -222,7 +222,10 @@ The rows a fetch manifest would pin (toolkit 2.3.2, target `rk3566`,
   whose cfg is the model's own. `--hybrid` exists only in `build`, so with
   it step 1 runs as a second calibration pass beside the build (v9-t
   normal, 2026-11-27: its output scales were the simulator's output steps
-  from `build`, and step 1 + 2 gave `build`'s parity counts exactly).
+  from `build`, and step 1 + 2 gave `build`'s parity counts exactly). That
+  pass knows nothing of the layers `--hybrid` moved to float16:
+  `NAME.ranges.json` then carries `"plan": "before auto_hybrid"` and
+  `NAME.json` takes no output scales or flags from it.
 - A `.rknn` hash does not identify a build: two builds from the same
   inputs differed in 200-240 bytes that read as heap addresses (v9-t
   normal and kl_divergence, 2026-11-27) with equal cfgs and parity.

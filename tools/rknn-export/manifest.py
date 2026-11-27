@@ -5,7 +5,8 @@ from inside DIR, busybox included) and DIR/MANIFEST.json. Build facts come from
 BUILD_DIR/NAME.json (default DIR/../final/build); a rung's twin is the .onnx in
 DIR whose hash is the one the rung was converted from. Exits non-zero, writing
 nothing, unless every .rknn has a build JSON with all steps ok, no recorded
-simulator error, and an rknn_sha256 equal to the file's hash.
+simulator error, no failed parity verdict, and an rknn_sha256 equal to the
+file's hash.
 The manifest is a public model repo's licence statement, so MIT is never read
 off a name (the GPL-3.0 YOLOv9 shares it): a twin is MIT only when
 BUILD_DIR/X.onnx.json, written by export_mit_yolov9.py, records the twin's own
@@ -51,6 +52,8 @@ for f in files:
         if any(v != "ok" for v in b["steps"].values()): bad.append(f"{f}: build steps not ok {b['steps']}"); continue
         # convert.py records a simulator/parity exception here while every step stays ok
         if isinstance(b.get("sim_outputs"), str): bad.append(f"{f}: build sim_outputs {b['sim_outputs']}"); continue
+        # a failed parity verdict fails convert.py's exit, not a step, and leaves the .rknn on disk
+        if b.get("parity_pass") is False: bad.append(f"{f}: build failed its parity verdict"); continue
         if b.get("rknn_sha256") != hashes[f]: bad.append(f"{f}: build json rknn_sha256 {b.get('rknn_sha256')} != file {hashes[f]}"); continue
         tw = twins[b["source_sha256"]]
         if tw in mit: row.update(license="MIT", source=mit[tw])
