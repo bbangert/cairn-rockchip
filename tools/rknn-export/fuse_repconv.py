@@ -138,7 +138,8 @@ def _check(a):
     left = sum(type(m).__name__ == "RepConv" for m in fused.modules())
     ann = os.path.join(sources.COCO, "annotations", "instances_val2017.json")
     xs = [torch.randn(1, 3, 640, 640).clamp(0, 1)]
-    for im in coco_run._images(ann, a.images):
+    # --images 0 is the random-input-only check and must not need COCO on disk
+    for im in coco_run._images(ann, a.images) if a.images else []:
         canvas, _ = coco_run.prepare(os.path.join(sources.COCO, "val2017", im["file_name"]), 640, "origin", "bilinear-cv2")
         xs.append(torch.from_numpy(canvas).permute(2, 0, 1).unsqueeze(0).float().div(255))
     worst = [(0.0, 0.0)] * 6
