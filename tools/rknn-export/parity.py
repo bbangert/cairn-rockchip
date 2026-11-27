@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Simulator-vs-FP32-ONNX parity.
-usage: parity.py NAME KIND   (reads $RKNN_OUT or work/rknn, NAME.parity.npz)
-KIND: split (airockchip triples) | yolox (N,85 obj*cls) | v8 (4+nc,A) | v8t (A,4+nc) | e2e (N,6) | generic
-yolox/split are scored by Acc (also used in-process by convert.py); the rest
+usage: parity.py NAME KIND [--logits]   (reads $RKNN_OUT or work/rknn, NAME.parity.npz)
+KIND: split (airockchip triples) | mit (box*/cls*[/sum*] by name, YOLOv9) | yolox (N,85 obj*cls) |
+      v8 (4+nc,A) | v8t (A,4+nc) | e2e (N,6) | generic
+yolox/split/mit are scored by Acc (also used in-process by convert.py); the rest
 by the trial's per-frame loop below. Acc pools counts over frames, never
 averaging per frame, so a frame with one positive weighs one positive. The
 trial kinds (legacy: v8/v8t/e2e/generic) print per-frame means. For v8/v8t,
 n_ref is averaged over frames that have a positive and n_sim over all frames,
 so those two are not comparable; e2e averages both over all frames.
-Positive = FP32 best-class score >= THR; recall = share of those the sim also scores >= THR."""
+Positive = FP32 best-class score >= THR; recall = share of those the sim also scores >= THR.
+mit_verdict is the pass/fail of a YOLOv9 rebuild (MIT_BAR); the COCO score stays the proof."""
 import json, os, re, sys
 import numpy as np
 
@@ -69,11 +71,19 @@ def _yolox(s, r):
     return d
 
 
-def _split(sim, ref):
+def _sigmoid(x):
+    with np.errstate(over="ignore"):
+        return 1 / (1 + np.exp(-x))
+
+
+def _split(sim, ref, logits=False):
+    """sim, ref: per stride a (box, cls, ...) group."""
     d = {}
     for k, stride in enumerate(STRIDES):
-        (sb, sc, _), (rb, rc, _) = sim[3 * k:3 * k + 3], ref[3 * k:3 * k + 3]
+        (sb, sc), (rb, rc) = sim[k][:2], ref[k][:2]
         sc, rc = sc[0].astype(np.float64), rc[0].astype(np.float64)
+        if logits:
+            sc, rc = _sigmoid(sc), _sigmoid(rc)
         part = _scores(sc.max(0).ravel(), rc.max(0).ravel(), sc[0].ravel(), rc[0].ravel())
         pos = rc.max(0) >= THR
         err = np.abs(_dfl(sb[0])[:, pos] - _dfl(rb[0])[:, pos]) * stride
@@ -83,7 +93,15 @@ def _split(sim, ref):
     return d
 
 
-def frame_stats(kind, sim, ref):
+def mit_levels(names, tensors):
+    """Outputs in the model's order -> per stride (box, cls), picked by name: the MIT export emits sum* between them."""
+    by = dict(zip(names, tensors))
+    missing = [f"{k}{i}" for i in range(3) for k in ("box", "cls") if f"{k}{i}" not in by]
+    if missing: raise ValueError(f"outputs {list(names)} lack {missing}")
+    return [(by[f"box{i}"], by[f"cls{i}"]) for i in range(3)]
+
+
+def frame_stats(kind, sim, ref, names=None, logits=False):
     shapes = [(s.shape, r.shape) for s, r in zip(sim, ref)]
     if len(sim) != len(ref) or any(a != b for a, b in shapes):
         raise ValueError(f"sim/ref outputs differ: {len(sim)} vs {len(ref)} tensors, shapes {shapes}")
@@ -92,7 +110,12 @@ def frame_stats(kind, sim, ref):
     d = {"frames": 1}
     for j, (s, r) in enumerate(zip(sim, ref)):
         d[f"cos.{j}"] = cos(s, r)
-    merge(d, _yolox(sim[0], ref[0]) if kind == "yolox" else _split(sim, ref))
+    if kind == "yolox":
+        merge(d, _yolox(sim[0], ref[0]))
+    elif kind == "mit":
+        merge(d, _split(mit_levels(names, sim), mit_levels(names, ref), logits))
+    else:
+        merge(d, _split([sim[3 * k:3 * k + 3] for k in range(3)], [ref[3 * k:3 * k + 3] for k in range(3)]))
     return d
 
 
@@ -120,17 +143,36 @@ def finalize(d):
 
 
 class Acc:
-    def __init__(self, kind):
-        self.kind, self.g = kind, {}
+    def __init__(self, kind, names=None, logits=False):
+        self.kind, self.names, self.logits, self.g = kind, names, logits, {}
 
     def add(self, group, sim, ref):
-        st = frame_stats(self.kind, sim, ref)
+        st = frame_stats(self.kind, sim, ref, self.names, self.logits)
         for g in {group, "all"}:
             merge(self.g.setdefault(g, {}), st)
 
     def result(self):
         if not self.g: raise ValueError("no frames scored")
         return {g: finalize(d) for g, d in sorted(self.g.items())}
+
+
+# A YOLOv9 rebuild passes when, pooled over the held-out frames (positive = FP32 score >= THR): the
+# simulator keeps RECALL of every class's positives and PERSON of the person ones, the DFL box moves
+# under BOX_PX input pixels at positives, and the top score is not capped more than CEILING below the
+# float one. Set before any INT8 build met it: in the simulator over the 90 held-out frames (2026-11-27) v9-t FP16 measures 0.997 /
+# 1.00 / 0.015 px / 0.0003, and v9-t INT8 normal (coco, 200) 0.41 / 0.70 / 0.78 px / 0.074, its
+# stride-16 and -32 class scores collapsed (recall 0.16 and 0.00). Revisit once the matrix shows what
+# a good INT8 build reaches.
+MIT_BAR = {"recall": 0.85, "person_recall": 0.90, "box_px": 1.0, "ceiling": 0.08}
+
+
+def mit_verdict(r, bar=MIT_BAR):
+    s, p = r["score"], r["person"]
+    checks = {"recall": s["recall"] is not None and s["recall"] >= bar["recall"],
+              "person_recall": p["recall"] is None or p["recall"] >= bar["person_recall"],
+              "box_px": r["box_err_px"] is not None and r["box_err_px"] <= bar["box_px"],
+              "ceiling": s["max_ref"] - s["max_sim"] <= bar["ceiling"]}
+    return {"pass": all(checks.values()), "checks": checks, "bar": bar}
 
 
 def shared_sources(calib_frames, parity_frames):
@@ -183,16 +225,22 @@ def legacy(name, d, kind):
 
 if __name__ == "__main__":
     name, kind = sys.argv[1:3]
+    logits = "--logits" in sys.argv[3:]
     path = os.path.join(os.environ.get("RKNN_OUT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "work", "rknn"),
                         name + ".parity.npz")
     print("scoring", path)
     d = np.load(path)
-    if kind in ("yolox", "split"):
+    if kind in ("yolox", "split", "mit"):
         frames = sorted({k.split("_")[0][3:] for k in d if k.startswith("sim")}, key=int)
         outs = sorted({int(k.split("_")[1]) for k in d if k.startswith("sim")})
-        acc = Acc(kind)
+        acc = Acc(kind, [str(n) for n in d["names"]] if "names" in d else None, logits)
         for i in frames:
             acc.add("all", [d[f"sim{i}_{j}"] for j in outs], [d[f"ref{i}_{j}"] for j in outs])
-        report(name, acc.result())
+        groups = acc.result()
+        report(name, groups)
+        if kind == "mit":
+            v = mit_verdict(groups["all"])
+            print(f"{name} verdict {'PASS' if v['pass'] else 'FAIL'} {v['checks']}")
+            sys.exit(0 if v["pass"] else 1)
     else:
         legacy(name, d, kind)
