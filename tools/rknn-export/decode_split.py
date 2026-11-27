@@ -76,12 +76,15 @@ def decode(boxes, clss, size, strides=STRIDES):
     return np.concatenate(xyxy), np.concatenate(scores)
 
 
-def _greedy(box, iou):
-    """Keep indices of score-descending `box` under strict `> iou` suppression, as torchvision.ops.nms."""
+def _greedy(box, iou, limit=None):
+    """Keep indices of score-descending `box` under strict `> iou` suppression, as torchvision.ops.nms.
+
+    With `limit`, stops after that many keeps: a prefix of the unlimited result, since a later keep never undoes an earlier one.
+    """
     area = (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
     alive = np.arange(len(box))
     keep = []
-    while alive.size:
+    while alive.size and (limit is None or len(keep) < limit):
         i = alive[0]
         keep.append(i)
         rest = alive[1:]
@@ -106,10 +109,8 @@ def nms(xyxy, scores, conf=0.001, iou=0.7, max_nms=30000, max_det=300):
     kept = []
     for cls in np.unique(c):
         idx = np.nonzero(c == cls)[0]  # still score-descending
-        k = _greedy(b[idx], iou)
-        # greedy keeps arrive in score order and later keeps cannot undo earlier ones, so
-        # a class never contributes more than max_det to the final top max_det.
-        kept.append(idx[k[:max_det]])
+        # a class never contributes more than max_det to the final top max_det
+        kept.append(idx[_greedy(b[idx], iou, max_det)])
     kept = np.concatenate(kept) if kept else np.empty(0, np.int64)
     kept = kept[np.argsort(-s[kept], kind="stable")][:max_det]
     return b[kept].astype(np.float32), s[kept].astype(np.float32), c[kept].astype(np.int64)

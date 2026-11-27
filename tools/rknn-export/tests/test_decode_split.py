@@ -159,6 +159,30 @@ def test_max_det_keeps_the_highest_scores_in_order():
     assert sc.tolist() == pytest.approx([1.0, 0.9, 0.8])
 
 
+def test_max_det_is_a_prefix_of_the_unlimited_result_in_one_class():
+    rng = np.random.default_rng(0)
+    n = 400
+    xy = rng.uniform(0, 600, (n, 2))
+    box = np.concatenate([xy, xy + rng.uniform(5, 30, (n, 2))], axis=1).astype(np.float32)
+    s = np.zeros((n, 80), np.float32)
+    s[:, 3] = np.sort(rng.uniform(0.1, 1, n))[::-1]
+    full = ds.nms(box, s, max_det=1000)
+    assert len(full[1]) > 50
+    for k in (1, 7, 50):
+        for lim, ref in zip(ds.nms(box, s, max_det=k), full):
+            assert np.array_equal(lim, ref[:k])
+
+
+def test_greedy_limit_returns_a_prefix():
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(0, 300, (200, 2))
+    box = np.concatenate([xy, xy + rng.uniform(5, 40, (200, 2))], axis=1).astype(np.float32)
+    full = ds._greedy(box, 0.5)
+    assert len(full) > 10
+    for k in (1, 5, len(full), len(full) + 3):
+        assert ds._greedy(box, 0.5, k).tolist() == full[:k].tolist()
+
+
 def test_max_det_across_classes_is_a_global_cut():
     n = 5
     box = np.stack([row(20 * i, 0, 20 * i + 10, 10) for i in range(n)])

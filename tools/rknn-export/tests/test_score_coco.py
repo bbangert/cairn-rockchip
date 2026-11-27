@@ -109,6 +109,23 @@ def test_npz_round_trip(tmp_path):
     assert back.images.tolist() == [1, 2, 3]  # includes the image with no detections
 
 
+def test_mismatched_columns_are_refused_not_truncated(tmp_path):
+    ann = write_ann(tmp_path / "a.json", [1], [(1, 1, BOX_A)])
+    d = dets([(1, 0, 0.9, 100, 100, 150, 150), (1, 0, 0.8, 1, 1, 9, 9)], [1])
+    with pytest.raises(ValueError, match="same|length|shapes"):
+        sc.evaluate(ann, d._replace(class_id=d.class_id[:1]))
+    with pytest.raises(ValueError, match="shapes"):
+        sc.evaluate(ann, d._replace(box=d.box[:, :3]))
+    with pytest.raises(ValueError, match="shapes"):
+        sc.evaluate(ann, d._replace(score=d.score[:, None]))
+    with pytest.raises(ValueError, match="shapes"):
+        sc.save_detections(tmp_path / "s.npz", d.image_id, d.class_id[:1], d.score, d.box, d.images)
+    p = tmp_path / "bad.npz"
+    np.savez(p, image_id=d.image_id, class_id=d.class_id[:1], score=d.score, box=d.box, images=d.images)
+    with pytest.raises(ValueError, match="shapes"):
+        sc.evaluate(ann, sc.load_detections(p))
+
+
 def test_cli_prints_one_line_and_writes_traceable_json(tmp_path, capsys):
     ann = write_ann(tmp_path / "a.json", [1], [(1, 1, BOX_A), (1, 1, BOX_B)])
     p = tmp_path / "d.npz"

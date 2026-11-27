@@ -29,18 +29,29 @@ class Detections(NamedTuple):
     images: np.ndarray    # int64 [M]
 
 
+def _check_columns(image_id, class_id, score, box):
+    # zip over mismatched columns truncates silently and would drop detections from the AP
+    n = np.shape(image_id)[0] if np.ndim(image_id) == 1 else None
+    if n is None or any(np.shape(a) != (n,) for a in (class_id, score)) or np.shape(box) != (n, 4):
+        raise ValueError(
+            "image_id, class_id and score must be 1-D of one length N and box [N, 4]; got shapes "
+            f"{np.shape(image_id)}, {np.shape(class_id)}, {np.shape(score)}, {np.shape(box)}")
+
+
 def save_detections(path, image_id, class_id, score, box, images):
-    n = len(image_id)
-    box = np.asarray(box, np.float32).reshape(-1, 4)
-    if not (len(class_id) == len(score) == len(box) == n):
-        raise ValueError("image_id, class_id, score and box must be the same length")
+    box = np.asarray(box, np.float32)
+    if box.size == 0:
+        box = box.reshape(0, 4)
+    _check_columns(image_id, class_id, score, box)
     np.savez_compressed(path, image_id=np.asarray(image_id, np.int64), class_id=np.asarray(class_id, np.int64),
                         score=np.asarray(score, np.float32), box=box, images=np.asarray(images, np.int64))
 
 
 def load_detections(path):
     with np.load(path) as z:
-        return Detections(*(z[k] for k in Detections._fields))
+        d = Detections(*(z[k] for k in Detections._fields))
+    _check_columns(*d[:4])
+    return d
 
 
 def _quiet(fn, *a):
@@ -53,6 +64,7 @@ def evaluate(ann_path, dets):
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
+    _check_columns(*dets[:4])
     gt = _quiet(COCO, ann_path)
     images = np.unique(dets.images)
     if not len(images):
