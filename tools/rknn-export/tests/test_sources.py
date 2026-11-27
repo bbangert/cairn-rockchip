@@ -89,6 +89,31 @@ def test_extract_keeps_to_the_listed_members(roots):
         sources.extract({"name": "a.zip", "members": ["annotations/missing.json"]})
 
 
+def test_extract_refuses_an_archive_with_an_unsafe_unselected_member(roots, tmp_path):
+    _, coco = roots
+    make_zip(coco / "a.zip", [("annotations/i.json", b"{}"), ("../evil.txt", b"y")])
+    with pytest.raises(sources.SourceError, match="unsafe"):
+        sources.extract({"name": "a.zip", "members": ["annotations/i.json"]})
+    assert [p.name for p in coco.rglob("*")] == ["a.zip"]
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_extract_refuses_an_unsafe_directory_entry(roots, tmp_path):
+    _, coco = roots
+    make_zip(coco / "a.zip", [("annotations/i.json", b"{}"), ("../d/", b"")])
+    with pytest.raises(sources.SourceError, match="unsafe"):
+        sources.extract({"name": "a.zip", "members": ["annotations/i.json"]})
+    assert [p.name for p in coco.rglob("*")] == ["a.zip"]
+    assert not (tmp_path / "d").exists()
+
+
+def test_extract_ignores_harmless_unselected_members(roots):
+    _, coco = roots
+    make_zip(coco / "a.zip", [("annotations/", b""), ("annotations/i.json", b"{}"), ("other/x.json", b"{}")])
+    sources.extract({"name": "a.zip", "members": ["annotations/i.json"]})
+    assert sorted(p.name for p in coco.rglob("*") if p.is_file()) == ["a.zip", "i.json"]
+
+
 class FakeResponse(io.BytesIO):
     def __enter__(self):
         return self
@@ -297,6 +322,31 @@ def test_coco_check_on_a_damaged_unstamped_tree_fails_and_stamps_nothing(tree, r
     assert not (coco / sources.COCO_STAMP).exists()
 
 
+def test_coco_stamp_is_removed_before_a_refetch_extracts_into_the_tree(tree, roots, monkeypatch):
+    _, coco = roots
+    sources.cmd_coco(tree)
+    assert sources.coco_present(tree["coco"])
+    (coco / "val2017" / "1.jpg").unlink()
+    monkeypatch.setattr(sources, "free_bytes", lambda p: 10**15)
+    monkeypatch.setattr(sources, "fetch_archive", lambda lock, a: None)
+
+    def interrupted(a):
+        (coco / "val2017" / "1.jpg").write_bytes(b"trunc")
+        raise RuntimeError("killed")
+
+    tree["coco"]["archives"][0].update(extracted_bytes=1)
+    monkeypatch.setattr(sources, "extract", interrupted)
+    with pytest.raises(RuntimeError):
+        sources.cmd_coco(tree)
+    assert not (coco / sources.COCO_STAMP).exists()
+    assert not sources.coco_present(tree["coco"])
+    with pytest.raises(sources.SourceError, match="truncated"):
+        sources.cmd_coco(tree)  # full count again, but the missing stamp sends it through the hash check
+    (coco / "val2017" / "1.jpg").write_bytes(b"1.jpg" * 10)
+    sources.cmd_coco(tree)
+    assert sources.coco_present(tree["coco"])
+
+
 def test_first_fetch_records_the_manifest(tree, roots):
     tree["coco"]["images_manifest"] = {"files": None, "sha256": None}
     sources.check_images(tree)
@@ -375,6 +425,14 @@ def test_sync_venv_failed_install_leaves_no_stamp(roots, monkeypatch):
     assert not (mit / "venv" / sources.VENV_STAMP).exists()
     with pytest.raises(sources.SourceError, match="no install stamp"):
         sources.sync_venv()
+
+
+def test_venv_diff_accepts_no_wheel_or_the_pinned_one_and_names_another(tree, roots, monkeypatch):
+    pin = sources.pins(sources.BUILD_REQ)["wheel"]
+    base = good_freeze()
+    for frozen, want in ((base, []), (base + [f"wheel=={pin}"], []), (base + ["wheel==0.0.1"], ["wheel"])):
+        monkeypatch.setattr(sources, "freeze", lambda venv, f=frozen: f)
+        assert sources.venv_diff("v") == want
 
 
 def test_venv_stamp_command_checks_the_freeze_against_the_pins(roots, monkeypatch):

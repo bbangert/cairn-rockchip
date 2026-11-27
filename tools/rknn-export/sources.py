@@ -237,8 +237,10 @@ def venv_diff(venv):
             got[norm(name)] = ver
         else:
             odd.append(line)
-    # wheel only builds the sdist; a venv installed before it was pinned lacks it
-    return sorted(odd + [k for k in want.keys() | got.keys() if k != "wheel" and want.get(k) != got.get(k)])
+    # A venv installed before wheel was pinned has none; one that has it must match the pin.
+    if "wheel" not in got:
+        want.pop("wheel", None)
+    return sorted(odd + [k for k in want.keys() | got.keys() if want.get(k) != got.get(k)])
 
 
 def cmd_venv_stamp(lock):
@@ -339,11 +341,12 @@ def fetch_archive(lock, a):
 def extract(a):
     only = a["members"]
     with zipfile.ZipFile(os.path.join(COCO, a["name"])) as z:
+        # Every entry, selected or not, directories included: one unsafe entry means the archive is not what the lock describes.
+        for i in z.infolist():
+            safe_member(i.filename, COCO)
         names = [i.filename for i in z.infolist() if not i.is_dir() and (only is None or i.filename in only)]
         if only is not None and sorted(names) != sorted(only):
             raise SourceError(f"{a['name']} lacks {set(only) - set(names)}")
-        for n in names:
-            safe_member(n, COCO)  # all checked before any is written
         for n in names:
             z.extract(n, COCO)
     step(f"extract: {a['name']} ({len(names)} files)")
@@ -394,6 +397,11 @@ def cmd_coco(lock, free=None):
     os.makedirs(COCO, exist_ok=True)
     for a in arcs:
         fetch_archive(lock, a)
+    # An interrupted extraction can leave the full file count with a truncated image; a surviving stamp would skip the hash check.
+    try:
+        os.remove(os.path.join(COCO, COCO_STAMP))
+    except FileNotFoundError:
+        pass
     for a in arcs:
         extract(a)
     check_counts(lock)
