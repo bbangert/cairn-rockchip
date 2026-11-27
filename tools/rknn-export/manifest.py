@@ -5,7 +5,12 @@ from inside DIR, busybox included) and DIR/MANIFEST.json. Build facts come from
 BUILD_DIR/NAME.json (default DIR/../final/build); a rung's twin is the .onnx in
 DIR whose hash is the one the rung was converted from. Exits non-zero, writing
 nothing, unless every .rknn has a build JSON with all steps ok, no recorded
-simulator error, and an rknn_sha256 equal to the file's hash."""
+simulator error, and an rknn_sha256 equal to the file's hash.
+The manifest is a public model repo's licence statement, so MIT is never read
+off a name (the GPL-3.0 YOLOv9 shares it): a twin is MIT only when
+BUILD_DIR/X.onnx.json, written by export_mit_yolov9.py, records the twin's own
+hash; an .rknn inherits licence and `source` from its twin. A yolov9* file
+without that provenance refuses. Otherwise yolox* is Apache-2.0, the rest AGPL-3.0."""
 import hashlib, json, os, sys
 
 d = os.path.abspath(sys.argv[1])
@@ -16,10 +21,22 @@ assert files and all(f.endswith((".rknn", ".onnx")) for f in files), files
 hashes = {f: sha(os.path.join(d, f)) for f in files}
 twins = {h: f for f, h in hashes.items() if f.endswith(".onnx")}
 rows, bad = [], []
+mit = {}
+for f in files:
+    sp = os.path.join(build, f + ".json")
+    if not f.endswith(".onnx") or not os.path.exists(sp): continue
+    try: sc = json.load(open(sp))
+    except ValueError: sc = None
+    if not isinstance(sc, dict) or sc.get("onnx_sha256") != hashes[f]:
+        bad.append(f"{f}: sidecar {sp} does not record this file's sha256"); continue
+    mit[f] = {"repo": "MultimediaTechLab/YOLO"} | {k: sc[o] for k, o in (
+        ("commit", "mit_commit"), ("checkpoint", "name"), ("checkpoint_sha256", "checkpoint_sha256")) if o in sc}
 for f in files:
     row = {"file": f, "sha256": hashes[f], "bytes": os.path.getsize(os.path.join(d, f)),
            "role": "rknn" if f.endswith(".rknn") else "twin",
            "license": "Apache-2.0" if f.startswith("yolox") else "AGPL-3.0"}
+    if f in mit: row.update(license="MIT", source=mit[f])
+    elif row["role"] == "twin" and f.startswith("yolov9"): bad.append(f"{f}: MIT sidecar {build}/{f}.json missing"); continue
     if row["role"] == "rknn":
         jp = os.path.join(build, f[:-5] + ".json")
         if not os.path.exists(jp): bad.append(f"{f}: no build json {jp}"); continue
@@ -29,7 +46,10 @@ for f in files:
         # convert.py records a simulator/parity exception here while every step stays ok
         if isinstance(b.get("sim_outputs"), str): bad.append(f"{f}: build sim_outputs {b['sim_outputs']}"); continue
         if b.get("rknn_sha256") != hashes[f]: bad.append(f"{f}: build json rknn_sha256 {b.get('rknn_sha256')} != file {hashes[f]}"); continue
-        row.update(twin=twins[b["source_sha256"]], toolkit=b["toolkit"], target=b["target_platform"], mode=b["mode"],
+        tw = twins[b["source_sha256"]]
+        if tw in mit: row.update(license="MIT", source=mit[tw])
+        elif f.startswith("yolov9"): bad.append(f"{f}: MIT sidecar for its twin {tw} missing"); continue
+        row.update(twin=tw, toolkit=b["toolkit"], target=b["target_platform"], mode=b["mode"],
                    quantized_algorithm=b["quantized_algorithm"], calib_set_id=b["calib_set_id"],
                    calib_policy=b["calib_policy"], source_sha256=b["source_sha256"])
     rows.append(row)
