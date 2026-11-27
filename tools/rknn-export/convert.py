@@ -71,6 +71,8 @@ def check_args(a):
     for k in ("onnx", "calib", "parity", "out"):
         if getattr(a, k): setattr(a, k, os.path.abspath(getattr(a, k)))
     if a.mode == "i8" and not a.calib: sys.exit("i8 needs --calib")
+    # an empty value (an unset shell variable) would otherwise build plain INT8 and say nothing
+    if a.float16 is not None and not all(a.float16.split(",")): sys.exit("--float16 needs patterns, none of them empty")
     if (a.hybrid or a.ranges or a.float16) and a.mode != "i8": sys.exit("--hybrid, --ranges and --float16 are INT8 options")
     if a.float16 and a.hybrid: sys.exit("--float16 and --hybrid exclude each other: auto_hybrid picks its own float16 layers")
     if a.parity:

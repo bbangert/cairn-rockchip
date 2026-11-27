@@ -188,3 +188,6 @@ def test_float16_is_int8_only_and_not_with_hybrid():
         convert.check_args(args(hybrid=True))
     with pytest.raises(SystemExit, match="INT8 options"):
         convert.check_args(args(mode="fp16"))
+    for empty in ("", "/a/*,", ",/a/*"):
+        with pytest.raises(SystemExit, match="none of them empty"):
+            convert.check_args(args(float16=empty))

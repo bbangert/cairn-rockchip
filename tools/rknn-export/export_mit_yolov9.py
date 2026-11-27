@@ -83,7 +83,8 @@ def check_graph(model, size, logits, with_sum, class_clamp=None):
         if sorted(n.input[0] for n in clips) != sorted(CLASS_CLAMP_AT):
             raise ValueError(f"Clip inputs {sorted(n.input[0] for n in clips)}, want {sorted(CLASS_CLAMP_AT)}")
         for n in clips:
-            if [float(consts[t]) for t in n.input[1:]] != [-class_clamp, class_clamp]:
+            # the graph holds float32 bounds: 32.1 is stored as 32.099998
+            if [consts[t] for t in n.input[1:]] != [np.float32(-class_clamp), np.float32(class_clamp)]:
                 raise ValueError(f"Clip {n.name!r} is not [-{class_clamp}, {class_clamp}]")
             # the SiLU's Sigmoid and Mul must both read the clipped tensor
             if [c.op_type for c in consumers[n.input[0]]] != ["Clip"]:

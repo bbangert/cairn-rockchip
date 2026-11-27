@@ -72,6 +72,8 @@ def write_json(path, obj):
 def fingerprint(a):
     # what the detections depend on; a resume under anything else would mix two models in one result
     keep = {k: v for k, v in sorted(vars(a).items()) if k not in ("workers", "threads", "print_stem")}
+    # absent when unused, as in the fingerprints written before the option existed
+    if keep.get("float16") is None: keep.pop("float16", None)
     calib = getattr(a, "calib", None)
     if calib and os.path.exists(os.path.join(calib, "set.json")):
         frames = json.load(open(os.path.join(calib, "set.json")))["frames"]

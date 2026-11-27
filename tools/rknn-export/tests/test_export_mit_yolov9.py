@@ -208,6 +208,7 @@ def test_class_clamp_is_checked_for_count_bounds_and_sole_consumer(monkeypatch):
     fails(clamped, "Clip nodes in an export without")
     with pytest.raises(ValueError, match="is not"):
         ex.check_graph(clamped, (W, H), False, True, 16.0)
+    ex.check_graph(onnx_edit.clamp(build(), ["stem"], 32.1), (W, H), False, True, 32.1)  # not a float32 value
     with pytest.raises(ValueError, match="Clip inputs"):
         ex.check_graph(build(), (W, H), False, True, 32.0)
     side = onnx_edit.clamp(build(), ["stem"], 32.0)
