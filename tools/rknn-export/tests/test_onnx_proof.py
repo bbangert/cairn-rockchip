@@ -61,7 +61,7 @@ RUN = {"name": "v9-t", "mode": "origin", "resample": "bilinear-cv2", "size": 640
 
 
 def baseline(**k):
-    return {**RUN, "AP": 38.21, **k}
+    return {**RUN, "stage": "pytorch", "AP": 38.21, **k}
 
 
 def test_baseline_with_the_same_settings_is_accepted_even_without_snap_flag():
@@ -70,7 +70,8 @@ def test_baseline_with_the_same_settings_is_accepted_even_without_snap_flag():
 
 
 @pytest.mark.parametrize("field,value", [("name", "v9-s"), ("mode", "centre"), ("resample", "lanczos-pil"),
-                                         ("size", [640, 384]), ("limit", 50), ("snap_scores", True)])
+                                         ("size", [640, 384]), ("limit", 50), ("snap_scores", True),
+                                         ("stage", "onnx"), ("stage", None)])
 def test_baseline_with_other_settings_is_refused(field, value):
     with pytest.raises(ValueError, match=field):
         op.check_baseline(baseline(**{field: value}), RUN)

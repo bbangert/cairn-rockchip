@@ -108,7 +108,9 @@ def check_baseline(base, run):
     baseline lacks reads as null and so differs."""
     got = {k: base.get(k) for k in ("name", "mode", "resample", "size", "limit", "checkpoint_sha256", "mit_commit")}
     got["snap_scores"] = base.get("snap_scores", False)  # absent in baselines written before the flag existed
-    want = {**run, "snap_scores": False}
+    got["stage"] = base.get("stage")
+    # an ONNX result handed in as the baseline would gate the model against itself
+    want = {**run, "snap_scores": False, "stage": "pytorch"}
     bad = {k: (got[k], want[k]) for k in want if got[k] != want[k]}
     if bad:
         raise ValueError("baseline differs from this run (baseline, run): " + json.dumps(bad))
