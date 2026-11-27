@@ -56,7 +56,7 @@ This toolkit gives an INT8 output tensor one scale. Everything else follows.
 
 - `venv` (here, ignored): `python3.11 -m venv venv && venv/bin/pip install
   -r requirements.txt`. Runs every script in this directory except the
-  Ultralytics export.
+  Ultralytics export and the YOLOv9 stages.
   `onnx` is pinned because pip's latest breaks `load_onnx`.
 - core's `tools/qdq-export/export-venv`: runs `export_ultralytics_rknn.py`
   only. The AGPL boundary is the one core's `tools/qdq-export/README.md`
@@ -65,6 +65,8 @@ This toolkit gives an INT8 output tensor one scale. Everything else follows.
   from them enters git or an image.
 - core's `plugins/cairn-detect/model/quant-venv`: runs the held-out census
   (core's `tools/qdq-export/calib_census.py`).
+- `work/mit/venv` (`sources.py mit`): torch, onnxruntime and the MIT
+  repo's dependencies; runs the YOLOv9 stages.
 - `tests/requirements.txt`: pytest's, in a venv of its own (see Tests).
 
 Scripts run as `venv/bin/python -I`. `-I` keeps the script directory off
@@ -230,6 +232,81 @@ venv/bin/python -I parity.py yolox_s_640_i8 yolox
   --std 58.395,57.12,57.375 --calib work/calib/st384_rgb --size 384x384 --input-name pixel_values
 ```
 
+## YOLOv9 (MIT)
+
+YOLOv9-t, -s and -m come from `MultimediaTechLab/YOLO`, the MIT-licensed
+rewrite, never from the GPL-3.0 original or an AGPL package, so what is
+built from them is MIT. Nothing fetched for this path enters git.
+
+**Sources.** `sources.lock` pins the repo at one commit, the three release
+checkpoints by bytes and sha256, and COCO val2017 (both archives, the
+annotation file, a digest over all 5000 images). `python3 -I sources.py mit`
+clones that commit, fetches and checks the checkpoints and builds
+`work/mit/venv` with `--require-hashes` (locked for x86_64 Linux, CPython
+3.11, CPU torch). `sources.py coco` fills `work/coco/` and refuses to start
+without room for the download (1.1 GB), the extraction (0.85 GB) and
+20 GiB of headroom. `sources.py verify` re-hashes everything and compares
+the venv's `pip freeze` with the requirements. Only v9-t's hash is one
+GitHub publishes; the rest were recorded on first fetch.
+
+**The v9-t checkpoint does not fit the pinned code.** Its class-branch neck
+is 80 wide where the code builds 128. MIT's loader only warns and leaves
+the class head untrained. `mit_model.load` builds that one width as the
+checkpoint has it and loads strictly, refusing a missing, reshaped or stray
+key. Every stage must load through it.
+
+**The cut.** Per stride (8/16/32) the model ends at the head's last convs:
+`box{0,1,2}` `[1, 64, h, w]`, raw DFL logits, and `cls{0,1,2}`
+`[1, 80, h, w]`, sigmoided; the export adds `sum{0,1,2}` as the split rungs
+carry them unless `--no-sum` (or `--logits`, raw class logits). The DFL
+and anchor tail quantises badly in INT8, so it is cut, as for the split
+rungs. The host decodes, with `decode_split.py` as the one reference every
+stage scores through; on the board, core's `SplitDfl` binds the outputs by
+name.
+
+**Stages.** Every stage feeds RGB scaled to 0..1 and runs as
+`work/mit/venv/bin/python -B -I`; `-B` keeps bytecode out of the MIT clone,
+which the exporter refuses unless it is clean at the pinned commit. The two
+scripts are long, resumable and log to their directory's `run.log`, ending
+`DONE` or `FAILED <step>`. Run one torch or onnxruntime job at a time.
+
+- `./baseline_mit.sh` scores each checkpoint in PyTorch on val2017 into
+  `work/mit/baseline/`, per resize (centred or top-left letterbox, stretch)
+  and resampler (PIL LANCZOS, cv2 bilinear), first checking the cut and
+  decode against MIT's own on 8 images. One variant: `baseline_mit.py v9-t --mode
+  origin --resample bilinear-cv2 [--size 640x384] [--snap-scores]`;
+  `--snap-scores` rounds class scores to k/256, an 8-bit output's cost alone.
+- `export_mit_yolov9.py v9-s --out work/mit/onnx/v9-s-fused.onnx --fuse
+  [--size WxH]` writes opset 12. `--fuse` folds each RepConv into one conv;
+  sizes are multiples of 32. A graph with the wrong outputs, a Softmax, an
+  unfolded BatchNorm, a tensor above 4-D or a dead branch is deleted. The
+  sidecar `FILE.onnx.json` records checkpoint, commit and file hashes.
+- `fuse_repconv.py v9-s` exits non-zero if a RepConv is left or any output
+  moves more than 1e-3 × max(1, max |plain|) on six inputs.
+- `./onnx_proof.sh` runs the fusion check, six exports, the top-left
+  baselines it gates against, then `onnx_proof.py` per export on
+  onnxruntime CPU. It exits non-zero when an output on 20 images differs
+  from PyTorch by more than 1e-3 × max(1, max |reference|), when AP is more
+  than 0.05 from the baseline, or when the baseline, sidecar or checkpoint
+  does not match the run.
+
+AP on full val2017 (5000 images), top-left letterbox, cv2 bilinear:
+
+| rung | PyTorch | ONNX, fused |
+|---|---|---|
+| v9-t 640 | 38.21 | 38.21 |
+| v9-s 640 | 46.56 | 46.56 |
+| v9-m 640 | 51.14 | 51.14 |
+| v9-t 640x384 | 35.88 | 35.88 |
+
+- Top-left is within 0.2 AP of centred (centred LANCZOS 38.26 / 46.69 /
+  51.14); stretch costs 1.7–1.8 (v9-t 36.50, v9-s 44.80). The resampler
+  moves AP by 0.06 at most.
+- 8-bit class scores cost 0.05 AP at most: 38.17 / 46.51 / 51.09.
+
+`manifest.py` labels a YOLOv9 file MIT only through the exporter's sidecar
+recording its hash; without one the manifest is refused.
+
 ## board/
 
 Probes that ran on the Green during bring-up, with the board's `python3` and
@@ -276,7 +353,9 @@ so a rung from `work/rungs` cannot be scored this way.
 ## Tests
 
 `python -m pytest tools/rknn-export` covers the parity arithmetic, the ONNX
-edits and the letterbox size rule, the pieces whose errors would be silent,
-and the manifest's refusals. `tests/requirements.txt` installs neither the
-toolkit nor onnxruntime, so under it the one check that runs a resized model
-is skipped.
+edits and the letterbox size rule, the YOLOv9 decode, scoring, graph checks
+and source fetch, the pieces whose errors would be silent, and the
+manifest's refusals. `tests/requirements.txt` installs none of the toolkit,
+onnxruntime, torch, PIL or cv2, so under it the checks that need them (a
+resized model run, the RepConv fold and loader in torch, the resamplers)
+are skipped.
