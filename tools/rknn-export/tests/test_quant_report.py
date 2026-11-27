@@ -168,6 +168,13 @@ def test_pin_float16_maps_the_matched_tensors_and_leaves_the_rest_of_the_cfg_alo
     assert q.parse_cfg(text) == q.parse_cfg(CFG)
 
 
+def test_pin_float16_quotes_a_name_yaml_would_not_read_back_bare():
+    cfg = CFG + "    'head: score':\n        dtype: asymmetric_affine\n    '123':\n        dtype: asymmetric_affine\n"
+    text, matched = q.pin_float16(cfg, ["head*", "123"])
+    assert matched == ["123", "head: score"]
+    assert text.startswith('custom_quantize_layers:\n    "123": float16\n    "head: score": float16\n')
+
+
 def test_pin_float16_refuses_a_pattern_that_matches_nothing():
     with pytest.raises(ValueError, match=r"/a/z\*"):
         q.pin_float16(CFG, ["/a/x", "/a/z*"])

@@ -37,7 +37,9 @@ AP_TOLERANCE = 0.05
 def variant_stem(name, meta, mode, resample, limit):
     # a model without sum tensors is a different export of the same flags, so it gets its own result
     nosum = "-nosum" if not meta.get("with_sum", True) and not meta["logits"] else ""
-    clamp = f"-clamp{meta['class_clamp']:g}" if meta.get("class_clamp") is not None else ""
+    k = meta.get("class_clamp")
+    # repr round-trips, so two clamps never share a stem; an integral K keeps the short spelling
+    clamp = "" if k is None else f"-clamp{int(k) if float(k).is_integer() else repr(float(k))}"
     return (f"{name}-onnx{'-fused' if meta['fuse'] else ''}{'-logits' if meta['logits'] else ''}{nosum}{clamp}"
             f"-{mode}-{resample}{size_suffix(meta['size'])}" + (f"-limit{limit}" if limit else ""))
 

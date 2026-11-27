@@ -208,6 +208,7 @@ def test_stem_marks_a_clamped_export_and_leaves_unclamped_sidecars_alone():
     base = {"fuse": True, "logits": False, "size": (640, 640)}
     stem = lambda **k: op.variant_stem("v9-t", {**base, **k}, "origin", "bilinear-cv2", None)
     assert stem(class_clamp=32.0) == "v9-t-onnx-fused-clamp32-origin-bilinear-cv2"
+    assert stem(class_clamp=32.12341) != stem(class_clamp=32.12344)
     assert stem(class_clamp=None) == stem() == "v9-t-onnx-fused-origin-bilinear-cv2"
 
 

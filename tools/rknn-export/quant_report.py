@@ -52,6 +52,13 @@ def parse_cfg(text):
 
 
 EMPTY_CUSTOM = "custom_quantize_layers: {}\n"
+# a name YAML reads back as the same string when written bare; any other is quoted. The names of the measured
+# builds are all bare, so their cfg stays byte for byte what was measured.
+BARE_KEY = re.compile(r"[A-Za-z_/][\w./-]*")
+
+
+def _key(n):
+    return n if BARE_KEY.fullmatch(n) and n.lower() not in ("true", "false", "null", "yes", "no", "on", "off") else json.dumps(n)
 
 
 def pin_float16(text, patterns):
@@ -66,7 +73,7 @@ def pin_float16(text, patterns):
         raise ValueError("the cfg does not start with an empty custom_quantize_layers")
     matched = sorted({n for v in hit.values() for n in v})
     # only the first line changes; the rest stays as step 1 wrote it
-    return "custom_quantize_layers:\n" + "".join(f"    {n}: float16\n" for n in matched) + text[len(EMPTY_CUSTOM):], matched
+    return "custom_quantize_layers:\n" + "".join(f"    {_key(n)}: float16\n" for n in matched) + text[len(EMPTY_CUSTOM):], matched
 
 
 def _one(v):
