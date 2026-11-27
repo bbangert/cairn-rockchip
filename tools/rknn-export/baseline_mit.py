@@ -72,6 +72,14 @@ def positive_int(text):
     return n
 
 
+def count(text):
+    # a negative K would reach a slice and select all but the last K images
+    n = int(text)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"{text} is below 0")
+    return n
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("usage:")[0].strip())
     ap.add_argument("name", choices=("v9-t", "v9-s", "v9-m"))
@@ -82,7 +90,7 @@ def main(argv=None):
     ap.add_argument("--out-dir", default=os.path.join(sources.MIT, "baseline"))
     ap.add_argument("--snap-scores", action="store_true",
                     help="round the class probabilities to k/256 before decode: the 8-bit sigmoid output cost, alone")
-    ap.add_argument("--check-mit-decode", type=int, default=0, metavar="K")
+    ap.add_argument("--check-mit-decode", type=count, default=0, metavar="K")
     ap.add_argument("--print-stem", action="store_true", help="print the result file's basename and exit")
     # batch-1 CPU inference stops scaling early: on 32 cores v9-t ran 13.9 img/s at 6 threads and
     # 10.2 at 20; the default was not itself measured

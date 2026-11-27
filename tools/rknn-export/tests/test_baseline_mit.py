@@ -56,3 +56,10 @@ def test_max_finite_diff_returns_the_max():
 def test_max_finite_diff_rejects_non_finite_values(ours, theirs):
     with pytest.raises(ValueError, match="non-finite score"):
         bm.max_finite_diff(np.array(ours), np.array(theirs), "score")
+
+
+def test_negative_decode_check_count_is_rejected_and_zero_kept(capsys):
+    with pytest.raises(SystemExit):
+        bm.main(["v9-t", "--mode", "origin", "--resample", "bilinear-cv2", "--check-mit-decode", "-1"])
+    assert "is below 0" in capsys.readouterr().err
+    assert bm.count("0") == 0 and bm.count("8") == 8

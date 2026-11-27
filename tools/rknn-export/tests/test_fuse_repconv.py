@@ -147,3 +147,10 @@ def test_fuse_one_refuses_branches_that_do_not_line_up(big_kw, small_kw):
     rep = _rep(torch, _torch_conv_bn(torch, 2, 3, 3, **big_kw), _torch_conv_bn(torch, 2, 3, 1, **small_kw))
     with pytest.raises(ValueError, match="do not line up"):
         fr.fuse_one(rep)
+
+
+def test_negative_image_count_is_rejected_and_zero_kept(capsys):
+    with pytest.raises(SystemExit):
+        fr.main(["v9-t", "--images", "-1"])
+    assert "is below 0" in capsys.readouterr().err
+    assert fr.count("0") == 0 and fr.count("5") == 5

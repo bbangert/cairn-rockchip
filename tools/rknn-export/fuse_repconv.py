@@ -101,10 +101,18 @@ def failures(worst, left):
     return bad
 
 
+def count(text):
+    # a negative K would reach a slice and select all but the last K images
+    n = int(text)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"{text} is below 0")
+    return n
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("usage:")[0].strip())
     ap.add_argument("name", choices=("v9-t", "v9-s", "v9-m"))
-    ap.add_argument("--images", type=int, default=5, help="real val2017 images besides the random input")
+    ap.add_argument("--images", type=count, default=5, help="real val2017 images besides the random input")
     ap.add_argument("--threads", type=int, default=8)
     a = ap.parse_args(argv)
     sys.path.insert(0, HERE)  # python -I leaves the script directory off sys.path
