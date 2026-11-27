@@ -4,9 +4,11 @@
 Detections interchange as an .npz (see save_detections): original-image pixels, dense
 COCO-80 class ids, plus the ids of every image that was run -- an image with no
 detections still counts, and a subset run scores only the images it ran.
-usage: score_coco.py ANN_JSON DETS_NPZ [--out RESULT_JSON] [--label NAME]
+--meta FILE.json merges a runner's record into the result, for a runner whose venv lacks pycocotools
+(the toolkit's): the same result shape as a runner that scores itself.
+usage: score_coco.py ANN_JSON DETS_NPZ [--out RESULT_JSON] [--label NAME] [--meta FILE.json]
 """
-import argparse, contextlib, hashlib, io, json
+import argparse, contextlib, hashlib, io, json, os
 from typing import NamedTuple
 
 import numpy as np
@@ -124,16 +126,26 @@ def main(argv=None):
     ap.add_argument("dets")
     ap.add_argument("--out")
     ap.add_argument("--label", default="")
+    ap.add_argument("--meta")
     a = ap.parse_args(argv)
     r = evaluate(a.ann, load_detections(a.dets))
     tail = "" if r["full_set"] else " [subset of the annotation images]"
     print(f"{a.label + ': ' if a.label else ''}AP {_fmt(r['AP'])} AP50 {_fmt(r['AP50'])} AP75 {_fmt(r['AP75'])} "
           f"({r['n_images']} images, {r['n_detections']} dets){tail}")
     if a.out:
+        if a.meta:
+            with open(a.meta) as f:
+                meta = json.load(f)
+            clash = sorted(set(meta) & set(r))
+            if clash:
+                raise SystemExit(f"{a.meta}: keys {clash} would overwrite the score")
+            r.update(meta)
         r.update({"label": a.label, "dets_sha256": _sha256(a.dets), "ann_sha256": _sha256(a.ann)})
-        with open(a.out, "w") as f:
+        # the .json is a resume marker for the handoff scripts, so it must never exist half-written
+        with open(a.out + ".tmp", "w") as f:
             json.dump(r, f, indent=1)
             f.write("\n")
+        os.replace(a.out + ".tmp", a.out)
     return r
 
 

@@ -10,7 +10,7 @@ import collections, concurrent.futures, contextlib, json, multiprocessing, os, s
 
 import numpy as np
 
-from decode_split import decode, nms, placement, unmap
+from decode_split import RULES, decode, detections, placement
 from score_coco import save_detections
 
 PAD = 114
@@ -50,11 +50,11 @@ def prepare(path, size, mode, resample):
 
 
 def _post(job):
-    image_id, p, size, t = job
+    image_id, p, size, t, rules = job
     t0 = time.perf_counter()
-    xyxy, scores = decode(t[0::2], t[1::2], size)
-    box, score, cls = nms(xyxy, scores)
-    return image_id, unmap(box, p), score, cls, time.perf_counter() - t0
+    xyxy, scores = decode(t[0::2], t[1::2], size, dtype=np.float64)
+    dets = {r: detections(xyxy, scores, p, size, r) for r in rules}
+    return image_id, dets, time.perf_counter() - t0
 
 
 @contextlib.contextmanager
@@ -84,21 +84,31 @@ def _images(ann_path, limit):
 
 
 def run(infer, images_dir, ann_path, size, mode, resample, out_npz, limit=None,
-        workers=os.cpu_count() or 1, prepare=prepare):
-    """Returns timings in seconds: wall, prepare, infer, and post (summed over workers)."""
-    images = _images(ann_path, limit)
+        workers=os.cpu_count() or 1, prepare=prepare, images=None):
+    """Returns timings in seconds: wall, prepare, infer, and post (summed over workers).
+
+    `out_npz` is one path (reference rules) or {rules: path}, every rule set decoded from the same
+    pass. `images` (annotation records) replaces the first `limit` of the sorted id list.
+    """
+    images = _images(ann_path, limit) if images is None else images
     if not images:
         raise ValueError("no images to run")
     size = _wh(size)
-    done = {"ids": [], "box": [], "score": [], "cls": [], "post": 0.0}
+    outs = {"reference": out_npz} if isinstance(out_npz, (str, os.PathLike)) else dict(out_npz)
+    if not outs or set(outs) - set(RULES):
+        raise ValueError(f"rules {sorted(outs)}: want some of {RULES}")
+    rules = tuple(outs)
+    done = {r: {"ids": [], "box": [], "score": [], "cls": []} for r in rules}
+    post = [0.0]
 
     def collect(res):
-        image_id, box, score, cls, dt = res
-        done["ids"].append(np.full(len(score), image_id, np.int64))
-        done["box"].append(box)
-        done["score"].append(score)
-        done["cls"].append(cls)
-        done["post"] += dt
+        image_id, dets, dt = res
+        for r, (box, score, cls) in dets.items():
+            done[r]["ids"].append(np.full(len(score), image_id, np.int64))
+            done[r]["box"].append(box)
+            done[r]["score"].append(score)
+            done[r]["cls"].append(cls)
+        post[0] += dt
 
     t_prep = t_infer = 0.0
     start = time.perf_counter()
@@ -113,7 +123,7 @@ def run(infer, images_dir, ann_path, size, mode, resample, out_npz, limit=None,
             t_prep, t_infer = t_prep + t1 - t0, t_infer + t2 - t1
             # a copy: the pool pickles a job on its feeder thread, after a runtime that reuses its
             # output buffers may already have written the next image into them
-            job = (im["id"], p, size, [np.array(a, np.float32) for a in out])
+            job = (im["id"], p, size, [np.array(a, np.float32) for a in out], rules)
             if pool is None:
                 collect(_post(job))
             else:
@@ -125,8 +135,10 @@ def run(infer, images_dir, ann_path, size, mode, resample, out_npz, limit=None,
         while pending:
             collect(pending.popleft().result())
 
-    cat = lambda k, shape, dt: np.concatenate(done[k]) if done[k] else np.empty(shape, dt)
-    save_detections(out_npz, cat("ids", (0,), np.int64), cat("cls", (0,), np.int64), cat("score", (0,), np.float32),
-                    cat("box", (0, 4), np.float32), [im["id"] for im in images])
+    for r, path in outs.items():
+        d = done[r]
+        cat = lambda k, shape, dt: np.concatenate(d[k]) if d[k] else np.empty(shape, dt)
+        save_detections(path, cat("ids", (0,), np.int64), cat("cls", (0,), np.int64), cat("score", (0,), np.float32),
+                        cat("box", (0, 4), np.float32), [im["id"] for im in images])
     return {"images": len(images), "wall": time.perf_counter() - start, "prepare": t_prep, "infer": t_infer,
-            "post": done["post"]}
+            "post": post[0]}

@@ -139,3 +139,18 @@ def test_cli_prints_one_line_and_writes_traceable_json(tmp_path, capsys):
     import hashlib
     assert r["dets_sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()
     assert r["ann_sha256"] == hashlib.sha256(open(ann, "rb").read()).hexdigest()
+
+
+def test_meta_merges_into_the_result_and_may_not_overwrite_the_score(tmp_path):
+    ann = write_ann(tmp_path / "a.json", [1], [(1, 1, BOX_A)])
+    p = tmp_path / "d.npz"
+    sc.save_detections(p, *dets([(1, 0, 0.9, 100, 100, 150, 150)], [1]))
+    meta, out = tmp_path / "m.json", tmp_path / "r.json"
+    meta.write_text(json.dumps({"stage": "rknn-sim", "rules": "core"}))
+    sc.main([ann, str(p), "--out", str(out), "--meta", str(meta)])
+    r = json.loads(out.read_text())
+    assert r["stage"] == "rknn-sim" and r["rules"] == "core" and r["AP"] == 100
+    meta.write_text(json.dumps({"AP": 1}))
+    with pytest.raises(SystemExit, match="overwrite"):
+        sc.main([ann, str(p), "--out", str(tmp_path / "r2.json"), "--meta", str(meta)])
+    assert not (tmp_path / "r2.json").exists()

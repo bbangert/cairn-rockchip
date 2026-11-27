@@ -347,6 +347,23 @@ recording its hash; without one the manifest is refused.
   fast check for a rebuild. With `--ranges` (not `--hybrid`) the build is
   `hybrid_quantization_step1` + `step2`, so the cfg is the model's own and
   calibration runs once (v9-t normal: same parity counts as `build`).
+- `sim_coco.py [--limit N] rknn NAME ONNX i8 [convert.py options]` builds
+  (with convert.py's `--parity`, `--ranges`, `--analysis` on the same
+  graph) and scores on val2017 in the simulator (v9-t: 6.0 images/s, one
+  core of this host, 2026-11-27); `sim_coco.py onnx ONNX` is the
+  float ONNX on the same images. Each writes detections for both rule sets:
+  the reference protocol, and `-core`, core's shipping decode (one class per
+  box, IoU 0.45, 300 candidates, 32 per image, wire rounding; v9-t float
+  ONNX on val2017, 2026-11-27: 36.35 AP and 141,566 detections, as the Rust
+  decode). At a 0.001 floor that is the decode, not what a camera emits at
+  `min_score`; for the logits export it is no shipping path (core's
+  SplitDfl applies no sigmoid). Score each with
+  `work/mit/venv/bin/python -I -B score_coco.py ANN STEM.npz --meta
+  STEM.meta.json --out STEM.json`.
+- `./quant_matrix.sh` runs the v9-t matrix, each build analysed and scored,
+  and writes `work/mit/quant/sim/summary.tsv`; detached, resumable, log
+  `work/mit/quant/matrix.log`. `LIMIT=N` scores the first N images; an mmse
+  build calibrates on `MMSE_N` frames (50), the others on 200.
 - `./build_rungs.sh mit` builds the t/s/m rungs into `work/rungs` with
   `MIT_ALGO`, `MIT_CALIB`, `MIT_CALIB_COUNT`.
 

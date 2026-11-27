@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Host-side decode, NMS and box un-mapping for a YOLOv9 exported with the DFL decode cut out.
 
-One implementation shared by the scoring runners (pytorch and onnx so far; the quantised
-stages are to use it too), so a difference between stages is the model and never the decode. numpy + stdlib only: it
+One implementation shared by the scoring runners (pytorch, onnx and the toolkit's simulator),
+so a difference between stages is the model and never the decode. numpy + stdlib only: it
 runs in venvs that have torch, onnxruntime or the RKNN toolkit, and in none of them
 together. Maths follows MultimediaTechLab/YOLO (Vec2Box, Anchor2Vec, PadAndResize);
-NMS follows the reference YOLOv9 validation protocol.
+NMS follows the reference YOLOv9 validation protocol; `core_nms` follows instead what core's
+`SplitDfl` decode puts on the wire (plugins/cairn-detect/src/infer/heads.rs). Scored at a 0.001
+floor that is core's decode, not what a camera emits: that is cut at its `min_score` (0.5 by default).
 
 Per level: box [1, 64, h, w] raw logits, channel = side * 16 + bin, sides left, top,
 right, bottom; cls [1, 80, h, w] already sigmoided.
@@ -45,8 +47,8 @@ def size_suffix(size):
     return "" if (w, h) == (640, 640) else f"-{w}x{h}"
 
 
-def decode(boxes, clss, size, strides=STRIDES):
-    """-> xyxy [A, 4] float32 in input pixels, scores [A, nc]; anchors by level, then y * w + x."""
+def decode(boxes, clss, size, strides=STRIDES, dtype=np.float32):
+    """-> xyxy [A, 4] `dtype` in input pixels, scores [A, nc]; anchors by level, then y * w + x."""
     w, h = _wh(size)
     if not (len(boxes) == len(clss) == len(strides)):
         raise ValueError(f"need one box and one cls tensor per stride {tuple(strides)}, "
@@ -71,7 +73,7 @@ def decode(boxes, clss, size, strides=STRIDES):
         ys, xs = np.mgrid[0:gh, 0:gw]
         ax, ay = (xs + 0.5) * stride, (ys + 0.5) * stride
         xyxy.append(np.stack([ax - ltrb[0], ay - ltrb[1], ax + ltrb[2], ay + ltrb[3]], axis=-1)
-                    .reshape(-1, 4).astype(np.float32))
+                    .reshape(-1, 4).astype(dtype))
         scores.append(np.asarray(c, dtype=np.float32)[0].transpose(1, 2, 0).reshape(gh * gw, -1))
     return np.concatenate(xyxy), np.concatenate(scores)
 
@@ -157,3 +159,79 @@ def unmap(boxes, p):
     b[:, [0, 2]] = b[:, [0, 2]].clip(0, p.src_w)
     b[:, [1, 3]] = b[:, [1, 3]].clip(0, p.src_h)
     return b
+
+
+RULES = ("reference", "core")
+CORE_MAX_EXTENT = 4.0  # heads.rs MAX_EXTENT: a box wider or taller than 4x the input is refused
+
+
+def round_half_away(x, places):
+    """Rust's f64::round at `places` decimals; numpy rounds half to even. trunc keeps the fraction exact."""
+    v = np.asarray(x, np.float64) * 10.0 ** places
+    t = np.trunc(v)
+    return (t + np.where(np.abs(v - t) >= 0.5, np.sign(v), 0)) / 10.0 ** places
+
+
+def _wire(box, p):
+    """heads.rs wire_bbox over un-projected boxes: normalised, clamped, 4 dp -> (x0, y0, w, h), alive."""
+    n = (np.array(box, np.float64).reshape(-1, 4) - [p.pad_left, p.pad_top, p.pad_left, p.pad_top])
+    # two divisions, as geometry.rs unproject: one by the product rounds differently at a 4-dp boundary
+    n /= [p.scale_x, p.scale_y, p.scale_x, p.scale_y]
+    n /= [p.src_w, p.src_h, p.src_w, p.src_h]
+    n = n.clip(0, 1)
+    w = round_half_away(np.maximum(n[:, 2] - n[:, 0], 0), 4)
+    h = round_half_away(np.maximum(n[:, 3] - n[:, 1], 0), 4)
+    return round_half_away(n[:, 0], 4), round_half_away(n[:, 1], 4), w, h, (w != 0) & (h != 0)
+
+
+def _iou_ge(box, i, rest, iou):
+    # heads.rs iou: areas floored at 0, an empty union is IoU 0; suppression at >=, not >
+    a, b = box[i], box[rest]
+    inter = np.prod(np.clip(np.minimum(a[2:], b[:, 2:]) - np.maximum(a[:2], b[:, :2]), 0, None), axis=1)
+    area = lambda r: np.clip(r[..., 2] - r[..., 0], 0, None) * np.clip(r[..., 3] - r[..., 1], 0, None)
+    union = area(a) + area(b) - inter
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ov = np.where(union > 0, inter / union, 0.0)
+    return ov >= iou
+
+
+def core_nms(xyxy, scores, p, size, floor=0.001, iou=0.45, max_cand=300, max_det=32):
+    """-> (boxes [N, 4] float64 in source pixels, scores [N] rounded to 3 dp, class ids [N]), as core emits them.
+
+    One class per anchor (the last of tied maxima, heads.rs argmax), score >= floor, boxes past
+    CORE_MAX_EXTENT or that the wire would refuse (wholly in the pad) dropped before the top
+    `max_cand` by score, class-aware NMS in input pixels, then the top `max_det`. Sorts are stable,
+    as Rust's sort_by: with 8-bit scores, ties are common and anchor order breaks them.
+    """
+    w, h = _wh(size)
+    scores = np.asarray(scores, np.float64)
+    nc = scores.shape[1]
+    c = nc - 1 - scores[:, ::-1].argmax(axis=1)
+    s = scores[np.arange(len(c)), c]
+    box = np.asarray(xyxy, np.float64)
+    ok = (s >= floor) & np.isfinite(box).all(axis=1)
+    ok &= (box[:, 2] - box[:, 0] <= CORE_MAX_EXTENT * w) & (box[:, 3] - box[:, 1] <= CORE_MAX_EXTENT * h)
+    box, c, s = box[ok], c[ok], s[ok]
+    box, c, s = (t[_wire(box, p)[4]] for t in (box, c, s))
+    order = np.argsort(-s, kind="stable")[:max_cand]
+    box, c, s = box[order], c[order], s[order]
+    keep = np.ones(len(s), bool)
+    for i in range(len(s)):
+        if keep[i]:
+            rest = np.nonzero(keep[i + 1:] & (c[i + 1:] == c[i]))[0] + i + 1
+            keep[rest[_iou_ge(box, i, rest, iou)]] = False
+    box, c, s = box[keep][:max_det], c[keep][:max_det], s[keep][:max_det]  # already score-descending
+    x0, y0, bw, bh, _ = _wire(box, p)
+    px = np.stack([x0 * p.src_w, y0 * p.src_h, (x0 + bw) * p.src_w, (y0 + bh) * p.src_h], axis=1)
+    return px.reshape(-1, 4), round_half_away(s.clip(0, 1), 3), c.astype(np.int64)
+
+
+def detections(xyxy, scores, p, size, rules="reference"):
+    """Decoded anchors (float64 boxes, as core keeps them) -> source-pixel boxes, scores, class ids under one of RULES.
+    The reference rules see float32 boxes, the precision their baselines were scored at."""
+    if rules == "reference":
+        box, score, cls = nms(np.asarray(xyxy, np.float32), scores)
+        return unmap(box, p), score, cls
+    if rules == "core":
+        return core_nms(xyxy, scores, p, size)
+    raise ValueError(f"unknown rules {rules!r}; want one of {RULES}")
