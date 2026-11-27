@@ -122,7 +122,8 @@ def load_baseline(path, run):
 
 
 def ap_failure(ap, base_ap, tol):
-    if not abs(ap - base_ap) <= tol:  # also true for NaN
+    # 1e-9: 38.16 - 38.21 is a hair over 0.05 in binary and must pass an inclusive 0.05; `not <=` is also true for NaN
+    if not abs(ap - base_ap) <= tol + 1e-9:
         return f"AP {ap} differs from the baseline AP {base_ap} by {ap - base_ap:+.4g}, above {tol}"
     return None
 
@@ -135,10 +136,12 @@ def positive_int(text):
 
 
 def verify_model(model, name, meta):
-    """-> (checkpoint path, sha256, MIT commit); ValueError unless the file and the pinned checkpoint match the sidecar."""
+    """-> (checkpoint path, sha256, MIT commit); ValueError unless the file and the pinned sources match the sidecar."""
     weights, sha, commit = mit_model.checkpoint(name)
-    if meta["checkpoint_sha256"] != sha or sources.sha256_file(model) != meta["onnx_sha256"]:
-        raise ValueError(f"{model} does not match its .json record or the pinned checkpoint")
+    # the commit too: the same checkpoint exported from another revision of the code is another model
+    if (meta["checkpoint_sha256"] != sha or meta.get("mit_commit") != commit
+            or sources.sha256_file(model) != meta["onnx_sha256"]):
+        raise ValueError(f"{model} does not match its .json record, the pinned checkpoint or the pinned MIT commit")
     return weights, sha, commit
 
 

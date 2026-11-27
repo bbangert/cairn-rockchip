@@ -78,6 +78,8 @@ def test_baseline_with_other_settings_is_refused(field, value):
 
 def test_ap_gate():
     assert op.ap_failure(38.24, 38.21, 0.05) is None
+    assert op.ap_failure(38.16, 38.21, 0.05) is None  # -0.05000000000000426 in binary
+    assert op.ap_failure(38.15, 38.21, 0.05)
     assert op.ap_failure(38.21, 38.24, 0.05) is None
     assert "-0.1" in op.ap_failure(38.11, 38.21, 0.05)
     assert op.ap_failure(NAN, 38.21, 0.05)
@@ -138,7 +140,7 @@ def test_is_current_treats_old_or_malformed_comparison_records_as_not_current(tm
 def test_verify_model_refuses_corrupt_bytes_and_other_checkpoints(tmp_path, monkeypatch):
     model = tmp_path / "m.onnx"
     model.write_bytes(b"bytes")
-    meta = {"onnx_sha256": op.sources.sha256_file(str(model)), "checkpoint_sha256": "ck"}
+    meta = {"onnx_sha256": op.sources.sha256_file(str(model)), "checkpoint_sha256": "ck", "mit_commit": "commit"}
     monkeypatch.setattr(op.mit_model, "checkpoint", lambda name: ("w.pt", "ck", "commit"))
     assert op.verify_model(str(model), "v9-t", meta) == ("w.pt", "ck", "commit")
     model.write_bytes(b"corrupt")
@@ -147,6 +149,9 @@ def test_verify_model_refuses_corrupt_bytes_and_other_checkpoints(tmp_path, monk
     model.write_bytes(b"bytes")
     with pytest.raises(ValueError, match="does not match"):
         op.verify_model(str(model), "v9-t", {**meta, "checkpoint_sha256": "other"})
+    for stale in ({**meta, "mit_commit": "older"}, {k: v for k, v in meta.items() if k != "mit_commit"}):
+        with pytest.raises(ValueError, match="does not match"):
+            op.verify_model(str(model), "v9-t", stale)
 
 
 def test_is_current_exits_2_for_a_model_that_differs_from_its_sidecar(tmp_path, monkeypatch, capsys):
