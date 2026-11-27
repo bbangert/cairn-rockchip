@@ -65,7 +65,7 @@ def merge(parts, n_chunks, rule, out_npz):
 def write_json(path, obj):
     # these files are resume markers: a kill mid-write must not leave a truncated one behind
     with open(path + ".tmp", "w") as f:
-        json.dump(obj, f, indent=1)
+        json.dump(obj, f, indent=1, default=str)
     os.replace(path + ".tmp", path)
 
 
@@ -136,6 +136,9 @@ def main(argv=None):
     a.onnx = os.path.abspath(a.onnx)
     a.out_dir = os.path.abspath(a.out_dir)
     meta = onnx_meta(a.onnx)
+    # the sidecar says whether cls* are logits: one left over from another export would score through the wrong decode
+    if meta.get("onnx_sha256") != sources.sha256_file(a.onnx):
+        sys.exit(f"{a.onnx}.json records another file's hash; export again")
     size = tuple(meta["size"])
     base = (f"{a.name}-sim" if a.stage == "rknn" else
             f"{os.path.splitext(os.path.basename(a.onnx))[0]}-ort") + size_suffix(size)
@@ -160,11 +163,14 @@ def main(argv=None):
     else:
         write_json(fp_path, fp)
     todo = [k for k in range(len(chunks(images, a.chunk))) if not chunk_done(parts, k)]
+    build_path = os.path.join(parts, "build.json")
 
     build_rec, infer = None, None
     if todo:
         if a.stage == "rknn":
             r, build_rec = build_quietly(a)
+            # NAME.json in --out is rewritten by the next conversion of that name; the result keeps its own copy
+            write_json(build_path, build_rec)
             names = convert.output_names(a)
 
             def infer(canvas):
@@ -195,8 +201,7 @@ def main(argv=None):
               f"{t['images'] / t['wall']:.2f} img/s", file=sys.stderr, flush=True)
 
     wall = sum(x["seconds"]["wall"] for x in runs)
-    build_json = os.path.join(a.out, a.name + ".json") if a.stage == "rknn" else None
-    build = json.load(open(build_json)) if build_json and os.path.exists(build_json) else None
+    build = json.load(open(build_path)) if os.path.exists(build_path) else None
     for rule, stem in st.items():
         merge(parts, len(all_chunks), rule, stem + ".npz")
         rec = {"name": meta["name"], "stage": "rknn-sim" if a.stage == "rknn" else "onnx", "rules": rule,
@@ -207,7 +212,7 @@ def main(argv=None):
                "build": build and {k: build.get(k) for k in (
                    "name", "mode", "quantized_algorithm", "quantized_method", "optimization_level", "auto_hybrid",
                    "auto_hybrid_cos_thresh", "calib_policy", "calib_set_id", "calib_count", "toolkit",
-                   "rknn_sha256", "float16_layers", "off_npu")},
+                   "rknn_sha256", "float16_layers", "off_npu", "outputs")},
                # a resumed run rebuilt the graph: one graph id, a file hash per build
                "graph_id": json.load(open(fp_path)).get("graph_id"),
                "rknn_sha256s": sorted({x["rknn_sha256"] for x in runs if x.get("rknn_sha256")}),

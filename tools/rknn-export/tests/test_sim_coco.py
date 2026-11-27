@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 
@@ -29,7 +30,7 @@ def test_chunks_merge_back_into_one_result(tmp_path):
 def test_a_resume_under_other_arguments_is_refused(tmp_path, monkeypatch):
     onnx = tmp_path / "m.onnx"
     onnx.write_bytes(b"model")
-    (tmp_path / "m.onnx.json").write_text(json.dumps({"size": [640, 640], "name": "v9-t"}))
+    (tmp_path / "m.onnx.json").write_text(json.dumps({"size": [640, 640], "name": "v9-t", "onnx_sha256": hashlib.sha256(b"model").hexdigest()}))
     monkeypatch.setattr(sim_coco.coco_run, "_images", lambda ann, limit: [{"id": 1}])
     stem = sim_coco.stems(str(tmp_path / "m-ort"), 5)["reference"]
     os.makedirs(stem + ".parts")
@@ -63,7 +64,7 @@ def onnx_run(tmp_path, monkeypatch):
     onnx = tmp_path / "m.onnx"
     onnx.write_bytes(b"model")
     (tmp_path / "m.onnx.json").write_text(json.dumps({
-        "size": [SIZE, SIZE], "name": "v9-t", "logits": False, "fuse": True, "onnx_sha256": "o",
+        "size": [SIZE, SIZE], "name": "v9-t", "logits": False, "fuse": True, "onnx_sha256": hashlib.sha256(b"model").hexdigest(),
         "checkpoint_sha256": "c", "mit_commit": "m"}))
     images = [{"id": i, "file_name": f"{i}.jpg", "width": 128, "height": 64} for i in (3, 5, 9)]
     monkeypatch.setattr(sim_coco.coco_run, "_images", lambda ann, limit: images)
@@ -161,3 +162,11 @@ def test_rknn_mode_defaults_to_the_float_reference_scaling_and_refuses_a_size(on
         sim_coco.main(["--print-stem", "rknn", "n", onnx, "i8", "--size", "32x32"])
     ap = sim_coco.convert.parser(add_help=False)
     assert ap.parse_args(["n", onnx, "i8"]).std == "1,1,1"  # convert.py's own default is unchanged
+
+
+def test_a_sidecar_of_another_export_is_refused(onnx_run):
+    argv, _state, _stem = onnx_run
+    with open(argv[-1], "wb") as f:
+        f.write(b"another export")
+    with pytest.raises(SystemExit, match="another file's hash"):
+        sim_coco.main(argv)

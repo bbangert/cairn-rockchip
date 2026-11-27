@@ -408,3 +408,11 @@ def test_core_reproduces_the_residual_in_heads_rs_nms_doc():
     x0, y0 = b[0, 0] / 1920, b[0, 1] / 1080
     assert [round(x0, 4), round(y0, 4), round(b[0, 2] / 1920 - x0, 4), round(b[0, 3] / 1080 - y0, 4)] == \
         [0.1563, 0.9957, 0.1563, 0.0043]  # 65 / 416 = 0.15625: half away from zero, where numpy says 0.1562
+
+
+def test_core_unprojects_by_scale_then_by_source_as_geometry_rs():
+    # 427 px wide filling 640: 4 / (scale * 427) is 0.00625000000000000..., which rounds up; core's
+    # 4 / scale / 427 lands just under and rounds down
+    p = ds.placement(427, 320, 640, "origin")
+    x0, _y0, _w, _h, alive = ds._wire([[4.0, 0.0, 100.0, 100.0]], p)
+    assert x0.tolist() == [0.0062] and alive.all()

@@ -141,8 +141,10 @@ for p in sorted(glob.glob(os.path.join(s, "*.json"))):
         continue
     r = json.load(open(p))
     name = os.path.basename(p)[:-5]
-    bj = os.path.join(b, (r.get("build") or {}).get("name") or "-") + ".json"
-    bd = json.load(open(bj)) if os.path.exists(bj) else {}
+    bd = r.get("build") or {}
+    if "outputs" not in bd:  # a result scored before the runner kept the build's record with it
+        bj = os.path.join(b, (bd.get("name") or "-") + ".json")
+        bd = json.load(open(bj)) if os.path.exists(bj) else {}
     f16 = bd.get("float16_layers", "")
     # max_score: the probability a cls output can reach, through the sigmoid for a logits export
     ceil = min((o.get("max_score", o["max_representable"]) for o in bd.get("outputs", []) if o["name"].startswith("cls") and o.get("quantized")), default=None)

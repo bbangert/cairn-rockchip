@@ -175,7 +175,9 @@ def round_half_away(x, places):
 def _wire(box, p):
     """heads.rs wire_bbox over un-projected boxes: normalised, clamped, 4 dp -> (x0, y0, w, h), alive."""
     n = (np.array(box, np.float64).reshape(-1, 4) - [p.pad_left, p.pad_top, p.pad_left, p.pad_top])
-    n /= [p.scale_x * p.src_w, p.scale_y * p.src_h, p.scale_x * p.src_w, p.scale_y * p.src_h]
+    # two divisions, as geometry.rs unproject: one by the product rounds differently at a 4-dp boundary
+    n /= [p.scale_x, p.scale_y, p.scale_x, p.scale_y]
+    n /= [p.src_w, p.src_h, p.src_w, p.src_h]
     n = n.clip(0, 1)
     w = round_half_away(np.maximum(n[:, 2] - n[:, 0], 0), 4)
     h = round_half_away(np.maximum(n[:, 3] - n[:, 1], 0), 4)
