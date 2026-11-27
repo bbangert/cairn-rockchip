@@ -72,6 +72,8 @@ def write_json(path, obj):
 def fingerprint(a):
     # what the detections depend on; a resume under anything else would mix two models in one result
     keep = {k: v for k, v in sorted(vars(a).items()) if k not in ("workers", "threads", "print_stem")}
+    # absent when unused, as in the fingerprints written before the option existed
+    if keep.get("float16") is None: keep.pop("float16", None)
     calib = getattr(a, "calib", None)
     if calib and os.path.exists(os.path.join(calib, "set.json")):
         frames = json.load(open(os.path.join(calib, "set.json")))["frames"]
@@ -205,14 +207,15 @@ def main(argv=None):
     for rule, stem in st.items():
         merge(parts, len(all_chunks), rule, stem + ".npz")
         rec = {"name": meta["name"], "stage": "rknn-sim" if a.stage == "rknn" else "onnx", "rules": rule,
-               "fused": meta["fuse"], "logits": meta["logits"], "mode": MODE, "resample": RESAMPLE,
+               "fused": meta["fuse"], "logits": meta["logits"], "class_clamp": meta.get("class_clamp"),
+               "mode": MODE, "resample": RESAMPLE,
                "size": onnx_proof.result_size(size), "limit": a.limit, "model": os.path.basename(a.onnx),
                "onnx_sha256": meta["onnx_sha256"], "checkpoint_sha256": meta["checkpoint_sha256"],
                "mit_commit": meta["mit_commit"],
                "build": build and {k: build.get(k) for k in (
                    "name", "mode", "quantized_algorithm", "quantized_method", "optimization_level", "auto_hybrid",
                    "auto_hybrid_cos_thresh", "calib_policy", "calib_set_id", "calib_count", "toolkit",
-                   "rknn_sha256", "float16_layers", "off_npu", "outputs")},
+                   "rknn_sha256", "float16_patterns", "float16_layers", "off_npu", "outputs")},
                # a resumed run rebuilt the graph: one graph id, a file hash per build
                "graph_id": json.load(open(fp_path)).get("graph_id"),
                "rknn_sha256s": sorted({x["rknn_sha256"] for x in runs if x.get("rknn_sha256")}),

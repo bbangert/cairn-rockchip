@@ -152,6 +152,9 @@ def test_a_set_without_per_frame_hashes_is_fingerprinted_as_convert_records_it(t
     fp = sim_coco.fingerprint(argparse.Namespace(onnx=str(onnx), calib=str(d), calib_count=1))
     want = sim_coco.prep_calib.subset_id([{"file": "000.png", "sha256": hashlib.sha256(b"a").hexdigest()}])
     assert fp["calib_set_id"] == want
+    ns = lambda **k: argparse.Namespace(onnx=str(onnx), calib=None, **k)
+    assert sim_coco.fingerprint(ns(float16=None)) == sim_coco.fingerprint(ns())  # a run begun before --float16
+    assert sim_coco.fingerprint(ns(float16="/a/*")) != sim_coco.fingerprint(ns())
 
 
 def test_rknn_mode_defaults_to_the_float_reference_scaling_and_refuses_a_size(onnx_run, capsys):

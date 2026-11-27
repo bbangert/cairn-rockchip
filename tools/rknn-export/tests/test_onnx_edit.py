@@ -82,3 +82,23 @@ def test_rename_renames_value_info():
     m = internal_chain()
     m.graph.value_info.append(h.make_tensor_value_info("output", T.FLOAT, [1, 5, 8, 8]))
     assert [v.name for v in onnx_edit.rename_outputs(m, ["o2"]).graph.value_info] == ["o2"]
+
+
+def silu():
+    nodes = [h.make_node("Conv", ["x", "w"], ["a"], name="conv"), h.make_node("Sigmoid", ["a"], ["s"], name="sig"),
+             h.make_node("Mul", ["a", "s"], ["y"], name="mul")]
+    vi = lambda n, c: h.make_tensor_value_info(n, T.FLOAT, [1, c, 4, 4])
+    g = h.make_graph(nodes, "g", [vi("x", 3)], [vi("y", 2)], [nh.from_array(np.ones((2, 3, 1, 1), np.float32), "w")])
+    return h.make_model(g, opset_imports=[h.make_opsetid("", 12)])
+
+
+def test_clamp_feeds_every_consumer_the_clipped_tensor_and_refuses_outputs_and_unknown_tensors():
+    m = onnx_edit.clamp(silu(), ["a"], 8.0)
+    assert [n.op_type for n in m.graph.node] == ["Conv", "Clip", "Sigmoid", "Mul"]
+    clip = m.graph.node[1]
+    assert clip.input[0] == "a" and [list(n.input) for n in m.graph.node[2:]] == [[clip.output[0]], [clip.output[0], "s"]]
+    assert [float(nh.to_array(i)) for i in m.graph.initializer if i.name.startswith("clamp_")] == [-8.0, 8.0]
+    onnx.checker.check_model(m)
+    for t in ("y", "nope"):
+        with pytest.raises(ValueError, match="internal"):
+            onnx_edit.clamp(silu(), [t], 8.0)

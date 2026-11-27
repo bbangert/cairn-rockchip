@@ -196,3 +196,27 @@ def test_forget_drops_the_resume_marker_and_tolerates_none(tmp_path):
     ex.forget(str(out))
     assert not (tmp_path / "m.onnx.json").exists()
     ex.forget(str(out))
+
+
+def test_class_clamp_is_checked_for_count_bounds_and_sole_consumer(monkeypatch):
+    import onnx_edit
+
+    assert ex.CLASS_CLAMP_AT == [f"/net/class_conv/class_conv.1/conv{s}/Conv_output_0" for s in ("", "_1", "_2")]
+    monkeypatch.setattr(ex, "CLASS_CLAMP_AT", ["stem"])  # the toy graph's one SiLU input
+    clamped = onnx_edit.clamp(build(), ["stem"], 32.0)
+    assert ex.check_graph(clamped, (W, H), False, True, 32.0)["op_histogram"]["Clip"] == 1
+    fails(clamped, "Clip nodes in an export without")
+    with pytest.raises(ValueError, match="is not"):
+        ex.check_graph(clamped, (W, H), False, True, 16.0)
+    ex.check_graph(onnx_edit.clamp(build(), ["stem"], 32.1), (W, H), False, True, 32.1)  # not a float32 value
+    with pytest.raises(ValueError, match="Clip inputs"):
+        ex.check_graph(build(), (W, H), False, True, 32.0)
+    side = onnx_edit.clamp(build(), ["stem"], 32.0)
+    side.graph.node.append(helper.make_node("Mul", ["stem", "stem"], ["dead"], name="raw_reader"))
+    with pytest.raises(ValueError, match="also feeds"):
+        ex.check_graph(side, (W, H), False, True, 32.0)
+
+
+def test_class_clamp_must_be_positive(tmp_path):
+    with pytest.raises(SystemExit):
+        ex.main(["v9-t", "--out", str(tmp_path / "m.onnx"), "--class-clamp", "0"])
