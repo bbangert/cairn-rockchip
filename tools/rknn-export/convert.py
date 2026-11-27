@@ -70,6 +70,8 @@ def check_args(a):
         assert a.kind and a.calib, "--parity needs --kind and --calib"
         cf, pf = (json.load(open(d + "/set.json"))["frames"] for d in (a.calib, a.parity))
         if not (cf and pf): sys.exit("calibration and parity sets must both have frames")
+        # only the --calib-count prefix trains the quantizer; calib_dataset refuses a count out of range
+        if a.calib_count and a.calib_count > 0: cf = cf[:a.calib_count]
         # frames of a calibration source would score the quantizer on its own training data
         shared = parity.shared_sources(cf, pf)
         if shared: sys.exit(f"calibration and parity share sources: {shared}")
@@ -384,7 +386,10 @@ def main(argv=None):
     if r is not None:
         # simulator run: shapes of what the model emits
         if res["_step"]("sim_init", lambda: r.init_runtime()):
-            post_steps(r, a, res)
+            try:
+                post_steps(r, a, res)
+            except Exception as e:  # the .rknn is exported by now; its record must still be written
+                res["steps"]["post"] = "ERR " + repr(e)[:300]; traceback.print_exc()
     rec = save(a, res)
     print(json.dumps(rec, indent=1, default=str))
     sys.exit(int(any(v != "ok" for v in rec["steps"].values()) or isinstance(rec.get("sim_outputs"), str)

@@ -4,8 +4,9 @@
 # its output exists, so a failed run resumes. Log: work/final/build.log.
 # `apache` needs no Ultralytics environment; `pack` (AGPL models) needs core's
 # qdq-export export-venv and the .pt files in work/src/weights; `mit` (the
-# MIT YOLOv9 rungs) needs work/mit/venv (sources.py mit) and fetches the COCO
-# train2017 calibration images coco_calib_ids.txt names. Its settings are
+# MIT YOLOv9 rungs) needs work/mit/venv (sources.py mit) and val2017
+# (sources.py coco, ~1 GB, which it does not fetch for you), and fetches the
+# COCO train2017 calibration images coco_calib_ids.txt names. Its settings are
 # MIT_ALGO, MIT_CALIB (coco|home) and MIT_CALIB_COUNT; the defaults are a
 # starting point, not a P3 result. A rung whose parity verdict fails stops it.
 # CAIRN_CORE_PATH names the core checkout that holds the clips, the
@@ -83,6 +84,8 @@ esac
 case $sel in mit|all)
   MPY=$W/mit/venv/bin/python
   MIT_ALGO=${MIT_ALGO:-normal} MIT_CALIB=${MIT_CALIB:-coco} MIT_CALIB_COUNT=${MIT_CALIB_COUNT:-200}
+  # the fusion check compares fused and unfused on val2017 stills
+  [ -f $W/coco/annotations/instances_val2017.json ] || die "val2017 missing: run sources.py coco"
   if [ ! -s $W/coco/train2017-calib/MANIFEST.sha256 ]; then
     $PY -I coco_calib.py fetch coco_calib_ids.txt $W/coco/train2017-calib || die "coco calibration fetch failed"
   fi

@@ -100,3 +100,38 @@ def test_a_set_without_per_frame_hashes_still_takes_a_count(tmp_path):
     _ds, rec = convert.calib_dataset(a, str(tmp_path))
     sha = hashlib.sha256(b"000.npy").hexdigest()
     assert rec["calib_set_id"] == prep_calib.subset_id([{"npy": "000.npy", "sha256": sha}])
+
+
+def test_parity_may_share_a_source_with_calibration_frames_the_count_leaves_out(tmp_path):
+    import json
+    import types
+    import convert
+
+    def write(name, srcs):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "set.json").write_text(json.dumps({"frames": [{"src": s} for s in srcs]}))
+        return str(d)
+
+    calib, held = write("calib", ["a_00.png", "b_00.png"]), write("held", ["b_01.png"])
+    args = lambda n: types.SimpleNamespace(onnx=None, calib=calib, parity=held, out=None, mode="i8", hybrid=False,
+                                           ranges=False, kind="mit", calib_count=n)
+    convert.check_args(args(1))
+    for n in (2, None):
+        with pytest.raises(SystemExit, match="share sources"):
+            convert.check_args(args(n))
+
+
+def test_a_failure_after_the_export_still_writes_the_record(monkeypatch):
+    import types
+    import convert
+
+    saved = {}
+    res = {"steps": {"build": "ok"}, "_step": lambda k, fn: fn() in (0, None)}
+    monkeypatch.setattr(convert, "check_args", lambda a: None)
+    monkeypatch.setattr(convert, "build", lambda a: (types.SimpleNamespace(init_runtime=lambda: 0), res))
+    monkeypatch.setattr(convert, "post_steps", lambda r, a, res: 1 / 0)
+    monkeypatch.setattr(convert, "save", lambda a, res: saved.update(res) or {"steps": res["steps"]})
+    with pytest.raises(SystemExit) as e:
+        convert.main(["n", "m.onnx", "i8"])
+    assert e.value.code == 1 and saved["steps"]["post"].startswith("ERR ZeroDivisionError")
