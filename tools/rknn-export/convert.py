@@ -105,6 +105,12 @@ def graph_id(infer, size):
     return d.hexdigest()
 
 
+def hashed(frames, files):
+    """Frames with the per-frame hash a set written before set.json carried one lacks, read off its files."""
+    return [f if "sha256" in f else {**f, "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}
+            for f, p in zip(frames, files)]
+
+
 def calib_dataset(a, out):
     """-> (dataset file the toolkit reads, set record): a --calib-count subset gets its own list and id."""
     if not a.calib: return None, {}
@@ -116,7 +122,7 @@ def calib_dataset(a, out):
     ds = os.path.join(out, a.name + ".dataset.txt")
     open(ds, "w").write("\n".join(files[:a.calib_count]) + "\n")
     rec.update(calib_count=a.calib_count, calib_full_set_id=rec["calib_set_id"],
-               calib_set_id=meta and prep_calib.subset_id(meta["frames"], a.calib_count))
+               calib_set_id=meta and prep_calib.subset_id(hashed(meta["frames"][:a.calib_count], files)))
     return ds, rec
 
 

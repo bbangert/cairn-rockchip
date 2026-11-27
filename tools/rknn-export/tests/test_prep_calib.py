@@ -82,3 +82,21 @@ def test_convert_calibrates_on_a_recorded_prefix(tmp_path):
     a.calib_count = 6
     with pytest.raises(SystemExit):
         convert.calib_dataset(a, str(tmp_path))
+
+
+def test_a_set_without_per_frame_hashes_still_takes_a_count(tmp_path):
+    import argparse
+    import hashlib
+    import json
+    import convert
+
+    d = tmp_path / "old"
+    d.mkdir()
+    for n in ("000.npy", "001.npy"):
+        (d / n).write_bytes(n.encode())
+    (d / "dataset.txt").write_text(f"{d}/000.npy\n{d}/001.npy\n")
+    (d / "set.json").write_text(json.dumps({"id": "x", "frames": [{"npy": "000.npy"}, {"npy": "001.npy"}]}))
+    a = argparse.Namespace(calib=str(d), calib_count=1, name="m")
+    _ds, rec = convert.calib_dataset(a, str(tmp_path))
+    sha = hashlib.sha256(b"000.npy").hexdigest()
+    assert rec["calib_set_id"] == prep_calib.subset_id([{"npy": "000.npy", "sha256": sha}])

@@ -115,7 +115,7 @@ def onnx_concats(path):
     return [(list(n.input), n.output[0]) for n in g.node if n.op_type == "Concat"]
 
 
-ROW = re.compile(r"^\[(\w+)\]\s+(\S+)\s+([\d.]+)\s*\|\s*(\S+)\s+([\d.]+)\s*\|\s*(\S+)\s*$")
+ROW = re.compile(r"^\[(\w+)\]\s+(\S+)\s+(-?[\d.]+)\s*\|\s*(\S+)\s+(-?[\d.]+)\s*\|\s*(\S+)\s*$")
 
 
 def parse_error_analysis(text):

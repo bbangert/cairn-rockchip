@@ -152,3 +152,8 @@ def test_a_line_inside_the_table_that_is_not_a_row_is_an_error():
         summarize.optable(odd)
     with pytest.raises(ValueError, match="closing"):
         summarize.optable(TABLE[:5])
+
+
+def test_a_negative_cosine_row_is_kept():
+    rows = q.parse_error_analysis("[Conv] /net/a -0.99000 | 34.98 0.99900 | 34.98\n[Conv] /net/b 0.5 | 1.0 -0.25 | 2.0")
+    assert [(r["entire_cos"], r["single_cos"]) for r in rows] == [(-0.99, 0.999), (0.5, -0.25)]

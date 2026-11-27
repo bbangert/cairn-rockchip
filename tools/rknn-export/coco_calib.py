@@ -56,8 +56,9 @@ def cmd_select(a):
 def cmd_fetch(a):
     ids = read_ids(a.ids)
     os.makedirs(a.dir, exist_ok=True)
-    have = {f for f in os.listdir(a.dir) if f.endswith(".jpg")}
-    if os.listdir(a.dir) and not have <= {file_name(i) for i in ids}:
+    # Every entry, not only .jpg: prep_calib takes a stray .png in this directory as a calibration frame.
+    names = {file_name(i) for i in ids}
+    if not set(os.listdir(a.dir)) <= names | {n + ".part" for n in names} | {"MANIFEST.sha256"}:
         sys.exit(f"{a.dir} holds files this list does not name; give a new or empty directory")
     for n, i in enumerate(ids, 1):
         dest = os.path.join(a.dir, file_name(i))
