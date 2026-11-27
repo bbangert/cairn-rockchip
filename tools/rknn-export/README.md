@@ -230,8 +230,12 @@ The rows a fetch manifest would pin (toolkit 2.3.2, target `rk3566`,
   rest: it builds through step 1 + 2 and, between them, maps every tensor
   of `NAME.quantization.cfg` an `fnmatch` pattern matches (`*` crosses
   `/`) to `float16` in its `custom_quantize_layers`. A pattern that matches
-  nothing fails the build. `NAME.json` records `float16_patterns` and
-  `float16_tensors`, and `NAME.ranges.json` leaves the pinned tensors out.
+  nothing fails the build. A pinned op's output is cast back to INT8 for
+  an INT8 consumer, so a wide tensor's consumer must be pinned as well
+  (v9-t: class_conv.1 alone left parity recall unchanged; with
+  class_conv.2 too it rose from 0.41 to 0.87). `NAME.json` records
+  `float16_patterns` and `float16_tensors`, and `NAME.ranges.json` leaves
+  the pinned tensors out.
   `auto_hybrid` chooses its own layers, so it is refused with `--hybrid`.
 - A `.rknn` hash does not identify a build: two builds from the same
   inputs differed in 200-240 bytes that read as heap addresses (v9-t
@@ -308,6 +312,18 @@ scripts are long, resumable and log to their directory's `run.log`, ending
   sizes are multiples of 32. A graph with the wrong outputs, a Softmax, an
   unfolded BatchNorm, a tensor above 4-D or a dead branch is deleted. The
   sidecar `FILE.onnx.json` records checkpoint, commit and file hashes.
+- `--class-clamp K` adds `Clip(-K, K)` on class_conv.1's three conv
+  outputs, before their SiLU, and records `class_clamp` in the sidecar
+  (`onnx_proof.py` stems gain `-clampK`). On v9-t float, one or two channels per stride
+  reach 85–627 against a median channel maximum of 6–7, and per-tensor
+  INT8 gives them the step of all; the next conv's weights on those
+  channels are negative for all 80 classes. K = 32 moves a float class
+  probability by at most 0.0026 over 60 calibration frames (box outputs
+  unchanged). The toolkit fuses the Clip into its conv (`ConvClip`),
+  leaving the SiLU its own `exSwish`: three more ops, all INT8 on the NPU
+  (v9-t normal, 200 frames: parity recall 0.824, person 0.933). The
+  torch module has no clamp, so `onnx_proof.py --compare` refuses a
+  clamped export; its proof is its float AP.
 - `fuse_repconv.py v9-s` exits non-zero if a RepConv is left or any output
   moves more than 1e-3 × max(1, max |plain|) on six inputs.
 - `./onnx_proof.sh` runs the fusion check, six exports, the top-left

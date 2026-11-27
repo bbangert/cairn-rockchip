@@ -2,7 +2,8 @@
 """Step-1 proof: an exported MIT YOLOv9 ONNX under onnxruntime (CPU), against PyTorch and scored on COCO val2017.
 
 --compare K first checks the graph against the PyTorch module it was exported from (flags read
-from FILE.onnx.json) on K images; a --logits model then gets its sigmoid on the host before decode.
+from FILE.onnx.json) on K images; a --logits model then gets its sigmoid on the host before decode. A
+--class-clamp export is refused there: the torch module has no clamp.
 --baseline FILE.json (a baseline_mit.py result for the same name, mode, resample, size and limit)
 fails the run when the AP differs by more than --ap-tol; it must also record this export's checkpoint
 hash and MIT commit. --is-current exits 0 when the model still matches its sidecar and the pinned
@@ -36,7 +37,8 @@ AP_TOLERANCE = 0.05
 def variant_stem(name, meta, mode, resample, limit):
     # a model without sum tensors is a different export of the same flags, so it gets its own result
     nosum = "-nosum" if not meta.get("with_sum", True) and not meta["logits"] else ""
-    return (f"{name}-onnx{'-fused' if meta['fuse'] else ''}{'-logits' if meta['logits'] else ''}{nosum}"
+    clamp = f"-clamp{meta['class_clamp']:g}" if meta.get("class_clamp") is not None else ""
+    return (f"{name}-onnx{'-fused' if meta['fuse'] else ''}{'-logits' if meta['logits'] else ''}{nosum}{clamp}"
             f"-{mode}-{resample}{size_suffix(meta['size'])}" + (f"-limit{limit}" if limit else ""))
 
 
@@ -214,6 +216,9 @@ def main(argv=None):
         meta = json.load(f)
     if meta["name"] != a.name:
         sys.exit(f"{a.model} was exported from {meta['name']}, not {a.name}")
+    if a.compare and meta.get("class_clamp") is not None:
+        sys.exit(f"{a.model} is clamped (--class-clamp {meta['class_clamp']:g}); the torch module is not, so they "
+                 "cannot be compared: its proof is the float AP")
     size = tuple(meta["size"])
     meta["size"] = size
     stem = os.path.join(a.out_dir, variant_stem(a.name, meta, a.mode, a.resample, a.limit))
@@ -283,6 +288,7 @@ def _run(a, meta, size, stem, base):
     import onnxruntime
 
     res.update({"name": a.name, "stage": "onnx", "fused": meta["fuse"], "logits": meta["logits"],
+                "class_clamp": meta.get("class_clamp"),
                 "mode": a.mode, "resample": a.resample, "size": result_size(size),
                 "limit": a.limit, "onnxruntime": onnxruntime.__version__, "model": os.path.basename(a.model),
                 "onnx_sha256": meta["onnx_sha256"], "checkpoint_sha256": sha, "mit_commit": commit,

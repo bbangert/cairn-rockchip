@@ -1,7 +1,7 @@
 #!/bin/sh
-# quant_matrix.sh: the v9-t INT8 matrix (P3-T2..T4) and its mixed-precision round (P3-T5: head tensors pinned to
-# float16), each build analysed (work/mit/quant/builds) and scored on COCO val2017 in the toolkit's simulator under
-# both rule sets, beside the float ONNX scored on the same images. Long: run it
+# quant_matrix.sh: the v9-t INT8 matrix (P3-T2..T4) and its class-branch round (P3-T5: tensors pinned to
+# float16, and a clamped export), each build analysed (work/mit/quant/builds) and scored on COCO val2017 in the
+# toolkit's simulator under both rule sets, beside the float ONNX scored on the same images. Long: run it
 # detached. One toolkit or onnxruntime job at a time. Resumable: a step whose output exists is skipped, and a
 # scoring run resumes chunk by chunk. A failed step logs `FAILED <step>` and the run goes on to the next; the
 # last line of work/mit/quant/matrix.log is DONE (or FAILED signal after INT/TERM/HUP). A signal to the script
@@ -132,15 +132,20 @@ float_ref v9-t
 variant "v9-t-unfused_i8_${A}_coco$N" v9-t i8 --algo "$A" --calib "$Q/calib/coco640" --calib-count "$N"
 variant "v9-t_i8_${A}_coco${N}_hybrid" v9-t-fused i8 --algo "$A" --calib "$Q/calib/coco640" --calib-count "$N" --hybrid
 variant "v9-t_i8_${A}_coco${N}_opt0" v9-t-fused i8 --algo "$A" --calib "$Q/calib/coco640" --calib-count "$N" --opt-level 0
-# fnmatch's * crosses /: cls1hi is class_conv.1's stride 16 and 32 tensors (4), cls1 all six, cls 15, head 27
-F16_CLS1='/net/class_conv/class_conv.1/*'
-variant v9-t_i8_normal_coco200_f16-cls1hi v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 \
-    --float16 '/net/class_conv/class_conv.1/*_1/*,/net/class_conv/class_conv.1/*_2/*'
-variant v9-t_i8_normal_coco200_f16-cls1 v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 --float16 "$F16_CLS1"
-variant v9-t_i8_normal_coco200_f16-cls v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 --float16 '/net/class_conv/*'
-variant v9-t_i8_normal_coco200_f16-head v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 \
-    --float16 '/net/class_conv/*,/net/anchor_conv/*'
-variant v9-t_i8_mmse_coco100_f16-cls1 v9-t-fused i8 --algo mmse --calib "$Q/calib/coco640" --calib-count 100 --float16 "$F16_CLS1"
+# P3-T5. A pinned op's output is cast back to INT8 for an INT8 consumer, so class_conv.1's float16 needs
+# class_conv.2 pinned too (measured: class_conv.1 alone did nothing). fnmatch's * crosses /: cls12hi pins
+# both at strides 16 and 32 (6 tensors), cls12 at all three (9). The clamp32 export clips class_conv.1's conv
+# outputs instead and stays pure INT8.
+F16_HI='/net/class_conv/class_conv.1/*_1/*,/net/class_conv/class_conv.1/*_2/*,/net/class_conv/class_conv.2_1/*,/net/class_conv/class_conv.2_2/*'
+F16_ALL='/net/class_conv/class_conv.1/*,/net/class_conv/class_conv.2*'
+variant v9-t_i8_normal_coco200_f16-cls12hi v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 --float16 "$F16_HI"
+variant v9-t_i8_normal_coco200_f16-cls12 v9-t-fused i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200 --float16 "$F16_ALL"
+variant v9-t_i8_mmse_coco100_f16-cls12 v9-t-fused i8 --algo mmse --calib "$Q/calib/coco640" --calib-count 100 --float16 "$F16_ALL"
+step "export v9-t-fused-clamp32" "$ONNX/v9-t-fused-clamp32.onnx.json" "$MPY" -B -I "$HERE/export_mit_yolov9.py" v9-t \
+    --out "$ONNX/v9-t-fused-clamp32.onnx" --fuse --class-clamp 32 &&
+    float_ref v9-t-fused-clamp32
+variant v9-t-clamp32_i8_normal_coco200 v9-t-fused-clamp32 i8 --algo normal --calib "$Q/calib/coco640" --calib-count 200
+variant v9-t-clamp32_i8_mmse_coco100 v9-t-fused-clamp32 i8 --algo mmse --calib "$Q/calib/coco640" --calib-count 100
 
 if ! "$MPY" -I -B - "$S" "$B" >>"$LOG" 2>&1 <<'PY'
 import glob, json, os, sys

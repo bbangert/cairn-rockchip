@@ -202,3 +202,18 @@ def test_scoring_refuses_non_finite_raw_outputs_naming_the_tensors(value, logits
     bad[0, 1, 0, 1] = value
     with pytest.raises(op.NonFinite, match="box0, cls2"):
         op.scoring_outputs(raw(box0=bad, cls2=bad), logits)
+
+
+def test_stem_marks_a_clamped_export_and_leaves_unclamped_sidecars_alone():
+    base = {"fuse": True, "logits": False, "size": (640, 640)}
+    stem = lambda **k: op.variant_stem("v9-t", {**base, **k}, "origin", "bilinear-cv2", None)
+    assert stem(class_clamp=32.0) == "v9-t-onnx-fused-clamp32-origin-bilinear-cv2"
+    assert stem(class_clamp=None) == stem() == "v9-t-onnx-fused-origin-bilinear-cv2"
+
+
+def test_a_clamped_export_is_not_compared_with_the_unclamped_torch_module(tmp_path):
+    model = tmp_path / "m.onnx"
+    (tmp_path / "m.onnx.json").write_text(json.dumps({"name": "v9-t", "fuse": True, "logits": False,
+                                                       "size": [640, 640], "class_clamp": 32.0}))
+    with pytest.raises(SystemExit, match="cannot be compared"):
+        op.main(["v9-t", str(model), "--mode", "origin", "--resample", "bilinear-cv2", "--compare", "2"])

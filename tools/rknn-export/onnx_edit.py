@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """ONNX graph edits shared by the export scripts. usage: onnx_edit.py resize IN.onnx OUT.onnx HxW"""
 import sys
+import numpy as np
 import onnx
+from onnx import helper, numpy_helper
 
 
 def rename_outputs(model, names):
@@ -24,6 +26,26 @@ def rename_outputs(model, names):
         v.name = mapping.get(v.name, v.name)
     for o, n in zip(g.output, names):
         o.name = n
+    return model
+
+
+def clamp(model, tensors, k, prefix="clamp"):
+    """Clip(-k, k) on each named tensor, every consumer reading the clipped one."""
+    g = model.graph
+    produced = {o for n in g.node for o in n.output}
+    if [t for t in tensors if t not in produced] or {o.name for o in g.output} & set(tensors):
+        raise ValueError(f"not all of {tensors} are internal tensors of the graph")
+    lo, hi = f"{prefix}_min", f"{prefix}_max"
+    g.initializer.extend([numpy_helper.from_array(np.array(-k, np.float32), lo),
+                          numpy_helper.from_array(np.array(k, np.float32), hi)])
+    nodes = []
+    for n in g.node:
+        n.input[:] = [t + "_clamped" if t in tensors else t for t in n.input]
+        nodes.append(n)
+        # right after its producer, so the node list stays topologically sorted
+        nodes += [helper.make_node("Clip", [o, lo, hi], [o + "_clamped"], name=o + "_clamp") for o in n.output if o in tensors]
+    del g.node[:]
+    g.node.extend(nodes)
     return model
 
 

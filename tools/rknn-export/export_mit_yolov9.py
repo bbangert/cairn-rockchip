@@ -5,8 +5,12 @@ Outputs are the split layout core's SplitDfl reads, by name (box0..2 [1,64,h,w] 
 cls0..2 [1,80,h,w] sigmoided) plus, as the ultralytics split rungs carry them, sum0..2
 [1,1,h,w] = cls summed over classes, interleaved box0 cls0 sum0 box1 ... Core binds by name and
 never reads sum*, so --no-sum is still accepted by it. --logits leaves cls raw and emits no
-sum: a sum over logits means nothing. check_graph asserts the saved graph with onnx alone.
-usage: export_mit_yolov9.py NAME --out FILE.onnx [--size 640|WxH] [--logits] [--fuse] [--no-sum]
+sum: a sum over logits means nothing. --class-clamp K clips the class neck's first conv output
+(class_conv.1, before its SiLU) to [-K, K] at each stride: on v9-t one or two of its channels reach
+85-627 against a median channel maximum of 6-7, and per-tensor INT8 gives them the step of all. That
+changes the model, so the sidecar records it and onnx_proof.py refuses to compare it with the torch
+module. check_graph asserts the saved graph with onnx alone.
+usage: export_mit_yolov9.py NAME --out FILE.onnx [--size 640|WxH] [--logits] [--fuse] [--no-sum] [--class-clamp K]
 """
 import argparse, collections, json, os, sys
 
@@ -23,6 +27,7 @@ OPSET = 12  # as export_ultralytics_rknn.py
 STRIDES = (8, 16, 32)
 NC = 80
 BOX_CH = 64  # 4 sides x 16 DFL bins
+CLASS_CLAMP_AT = [f"/net/class_conv/class_conv.1/conv{s}/Conv_output_0" for s in ("", "_1", "_2")]
 
 
 def expected_outputs(size, logits, with_sum):
@@ -48,7 +53,7 @@ def _attr(node, name, default=None):
     return default
 
 
-def check_graph(model, size, logits, with_sum):
+def check_graph(model, size, logits, with_sum, class_clamp=None):
     """Raises ValueError naming the first violated property; -> the record written beside the model."""
     w, h = size
     if logits and with_sum:
@@ -70,6 +75,19 @@ def check_graph(model, size, logits, with_sum):
     img = next(i for i in g.input if i.name == "images")
     if img.type.tensor_type.elem_type != onnx.TensorProto.FLOAT or _dims(img) != [1, 3, h, w]:
         raise ValueError(f"input images is {_dims(img)}, want float32 [1, 3, {h}, {w}]")
+
+    clips = [n for n in nodes if n.op_type == "Clip"]
+    if class_clamp is None and clips:
+        raise ValueError(f"{len(clips)} Clip nodes in an export without --class-clamp")
+    if class_clamp is not None:
+        if sorted(n.input[0] for n in clips) != sorted(CLASS_CLAMP_AT):
+            raise ValueError(f"Clip inputs {sorted(n.input[0] for n in clips)}, want {sorted(CLASS_CLAMP_AT)}")
+        for n in clips:
+            if [float(consts[t]) for t in n.input[1:]] != [-class_clamp, class_clamp]:
+                raise ValueError(f"Clip {n.name!r} is not [-{class_clamp}, {class_clamp}]")
+            # the SiLU's Sigmoid and Mul must both read the clipped tensor
+            if [c.op_type for c in consumers[n.input[0]]] != ["Clip"]:
+                raise ValueError(f"{n.input[0]!r} also feeds {[c.op_type for c in consumers[n.input[0]]]}")
 
     resize = []
     for n in nodes:
@@ -178,7 +196,10 @@ def main(argv=None):
     ap.add_argument("--logits", action="store_true", help="raw class logits, no Sigmoid; implies no sum tensors")
     ap.add_argument("--fuse", action="store_true", help="fold each RepConv into one conv before export")
     ap.add_argument("--no-sum", action="store_true", help="omit sum0..2")
+    ap.add_argument("--class-clamp", type=float, metavar="K", help="clip class_conv.1's conv outputs to [-K, K]")
     a = ap.parse_args(argv)
+    if a.class_clamp is not None and not a.class_clamp > 0:
+        ap.error("--class-clamp must be positive")
 
     import mit_model, sources
 
@@ -233,16 +254,21 @@ def _export(a, with_sum, w, h):
         torch.onnx.export(Split().eval(), torch.zeros(1, 3, h, w), a.out, input_names=["images"],
                           output_names=names, opset_version=OPSET, do_constant_folding=True)
     try:
-        check = check_graph(onnx.load(a.out), (w, h), a.logits, with_sum)
+        model = onnx.load(a.out)
+        if a.class_clamp is not None:
+            import onnx_edit
+            onnx.save(onnx_edit.clamp(model, CLASS_CLAMP_AT, a.class_clamp, "class_clamp"), a.out)
+        check = check_graph(model, (w, h), a.logits, with_sum, a.class_clamp)
     except BaseException:
         os.remove(a.out)
         raise
     record = {"name": a.name, "size": [w, h], "logits": a.logits, "fuse": a.fuse, "with_sum": with_sum,
+              "class_clamp": a.class_clamp,
               "checkpoint_sha256": sha, "mit_commit": commit, "load": net.load_report,
               "torch": torch.__version__, "onnx": onnx.__version__, "numpy": np.__version__,
               "python": sys.version.split()[0], "opset": check["opset"],
               "tool_sha256": {f: sources.sha256_file(os.path.join(HERE, f))
-                              for f in ("export_mit_yolov9.py", "mit_model.py", "fuse_repconv.py")},
+                              for f in ("export_mit_yolov9.py", "mit_model.py", "fuse_repconv.py", "onnx_edit.py")},
               "onnx_sha256": sources.sha256_file(a.out), "check": check}
     # the sidecar is the resume marker, so it must never exist half-written
     with open(a.out + ".json.tmp", "w") as f:

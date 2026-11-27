@@ -205,7 +205,8 @@ def main(argv=None):
     for rule, stem in st.items():
         merge(parts, len(all_chunks), rule, stem + ".npz")
         rec = {"name": meta["name"], "stage": "rknn-sim" if a.stage == "rknn" else "onnx", "rules": rule,
-               "fused": meta["fuse"], "logits": meta["logits"], "mode": MODE, "resample": RESAMPLE,
+               "fused": meta["fuse"], "logits": meta["logits"], "class_clamp": meta.get("class_clamp"),
+               "mode": MODE, "resample": RESAMPLE,
                "size": onnx_proof.result_size(size), "limit": a.limit, "model": os.path.basename(a.onnx),
                "onnx_sha256": meta["onnx_sha256"], "checkpoint_sha256": meta["checkpoint_sha256"],
                "mit_commit": meta["mit_commit"],
