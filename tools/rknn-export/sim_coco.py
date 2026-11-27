@@ -212,7 +212,7 @@ def main(argv=None):
                "build": build and {k: build.get(k) for k in (
                    "name", "mode", "quantized_algorithm", "quantized_method", "optimization_level", "auto_hybrid",
                    "auto_hybrid_cos_thresh", "calib_policy", "calib_set_id", "calib_count", "toolkit",
-                   "rknn_sha256", "float16_layers", "off_npu", "outputs")},
+                   "rknn_sha256", "float16_patterns", "float16_layers", "off_npu", "outputs")},
                # a resumed run rebuilt the graph: one graph id, a file hash per build
                "graph_id": json.load(open(fp_path)).get("graph_id"),
                "rknn_sha256s": sorted({x["rknn_sha256"] for x in runs if x.get("rknn_sha256")}),

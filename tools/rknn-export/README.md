@@ -226,6 +226,13 @@ The rows a fetch manifest would pin (toolkit 2.3.2, target `rk3566`,
   pass knows nothing of the layers `--hybrid` moved to float16:
   `NAME.ranges.json` then carries `"plan": "before auto_hybrid"` and
   `NAME.json` takes no output scales or flags from it.
+- `--float16 'P1,P2'` keeps named tensors in float16 and quantises the
+  rest: it builds through step 1 + 2 and, between them, maps every tensor
+  of `NAME.quantization.cfg` an `fnmatch` pattern matches (`*` crosses
+  `/`) to `float16` in its `custom_quantize_layers`. A pattern that matches
+  nothing fails the build. `NAME.json` records `float16_patterns` and
+  `float16_tensors`, and `NAME.ranges.json` leaves the pinned tensors out.
+  `auto_hybrid` chooses its own layers, so it is refused with `--hybrid`.
 - A `.rknn` hash does not identify a build: two builds from the same
   inputs differed in 200-240 bytes that read as heap addresses (v9-t
   normal and kl_divergence, 2026-11-27) with equal cfgs and parity.

@@ -4,7 +4,7 @@
 usage: convert.py NAME ONNX {i8|fp16} [--mean 0,0,0] [--std 1,1,1] [--calib DIR [--calib-count N]]
          [--size WxH] [--input-name images] [--outputs a,b] [--analysis N]
          [--algo normal|mmse|kl_divergence] [--hybrid [--hybrid-cos 0.999]] [--opt-level 3]
-         [--ranges] [--refuse-cpu] [--disable-rules r1,r2]
+         [--ranges] [--float16 PATTERNS] [--refuse-cpu] [--disable-rules r1,r2]
          [--out DIR] [--kind yolox|split|mit --parity DIR [--dump N]]
 Writes OUT/NAME.rknn and OUT/NAME.json (steps ok/err, timings, toolkit and
 quantization settings, calibration/parity set ids, sha256 of the source ONNX
@@ -26,6 +26,12 @@ NAME.ranges.json (each output's scale, zero point and representable range,
 clipped box tensors, score ceilings, narrow Concat inputs, widest tensors).
 With --hybrid those describe the graph before auto_hybrid's float16 moves
 (`plan` says so) and NAME.json takes no `outputs` or `flags` from them.
+--float16 PATTERNS (comma-separated fnmatch patterns over the cfg's tensor
+names; `*` crosses `/`) builds through step 1 + 2 too, and pins every tensor
+they match to float16 in the cfg's custom_quantize_layers before step 2; a
+pattern matching nothing fails the build. Not with --hybrid. NAME.json
+records `float16_patterns` and `float16_tensors`; `float16_layers` is still
+what the operator table shows.
 --analysis N runs accuracy_analysis on N of the frames calibration used (the
 --calib-count prefix), one call each (a call reads one frame per model
 input), into NAME.analysis.json; the ~0.75 GB of tensor dumps per frame are
@@ -55,7 +61,7 @@ def parser(add_help=True):
     ap.add_argument("--algo", default="normal", choices=ALGOS); ap.add_argument("--disable-rules"); ap.add_argument("--input-name", default="images")
     ap.add_argument("--hybrid", action="store_true"); ap.add_argument("--hybrid-cos", type=float, default=0.999)
     ap.add_argument("--opt-level", type=int, default=3, choices=range(4)); ap.add_argument("--ranges", action="store_true")
-    ap.add_argument("--refuse-cpu", action="store_true")
+    ap.add_argument("--refuse-cpu", action="store_true"); ap.add_argument("--float16")
     ap.add_argument("--out", default=os.path.join(HERE, "work", "rknn")); ap.add_argument("--kind", choices=["yolox", "split", "mit"])
     ap.add_argument("--parity"); ap.add_argument("--dump", type=int, default=0)
     return ap
@@ -65,7 +71,8 @@ def check_args(a):
     for k in ("onnx", "calib", "parity", "out"):
         if getattr(a, k): setattr(a, k, os.path.abspath(getattr(a, k)))
     if a.mode == "i8" and not a.calib: sys.exit("i8 needs --calib")
-    if (a.hybrid or a.ranges) and a.mode != "i8": sys.exit("--hybrid and --ranges are INT8 options")
+    if (a.hybrid or a.ranges or a.float16) and a.mode != "i8": sys.exit("--hybrid, --ranges and --float16 are INT8 options")
+    if a.float16 and a.hybrid: sys.exit("--float16 and --hybrid exclude each other: auto_hybrid picks its own float16 layers")
     if a.parity:
         assert a.kind and a.calib, "--parity needs --kind and --calib"
         cf, pf = (json.load(open(d + "/set.json"))["frames"] for d in (a.calib, a.parity))
@@ -168,6 +175,7 @@ def build(a):
            "toolkit": version("rknn-toolkit2"), "target_platform": "rk3566", "quantized_algorithm": a.algo,
            "quantized_method": "channel", "optimization_level": a.opt_level, "mean": a.mean, "std": a.std,
            "auto_hybrid": a.hybrid, "auto_hybrid_cos_thresh": a.hybrid_cos if a.hybrid else None,
+           "float16_patterns": a.float16 and a.float16.split(","), "float16_tensors": None,
            "calib_set_id": None, "calib_policy": None, **crec, "parity_set_id": setid(a.parity),
            "source": os.path.basename(a.onnx), "source_sha256": sha(a.onnx)}
     if a.mode == "fp16":  # a dataset only feeds quantization; the record must not claim one
@@ -186,11 +194,12 @@ def build(a):
             res["secs"][k] = round(time.time() - t, 1)
     res["_step"] = step
     ok = step("load", lambda: r.load_onnx(model=a.onnx, **load_kw(a)))
-    if a.ranges and not a.hybrid:
+    if a.float16 or (a.ranges and not a.hybrid):
         # step 1 + step 2 is a build whose per-tensor record is the cfg it was built from, at the cost of one
         # calibration (v9-t mmse, 20 frames: 400 s); v9-t normal gave build's parity counts exactly (2026-11-27)
         res["build_path"] = "hybrid_quantization_step1+2"
         ok = ok and step("build", lambda: step1(r, a, dataset))
+        if a.float16: ok = ok and step("float16", lambda: pin_float16(a, res))
         if ok:
             r = RKNN(verbose=True, verbose_file=os.path.join(out, a.name + ".step2.log"))
             configure(r, a)
@@ -219,6 +228,8 @@ def build(a):
     if ok: res["rknn_sha256"] = sha(os.path.join(out, a.name + ".rknn"))
     ok = ok and step("load_rknn", lambda: RKNN().load_rknn(os.path.join(out, a.name + ".rknn")))  # the file itself, not the live graph
     if ok: res["size_mb"] = round(os.path.getsize(os.path.join(out, a.name + ".rknn")) / 1e6, 2)
+    for ext in ("model", "data"):
+        if os.path.exists(f"{a.name}.{ext}"): os.remove(f"{a.name}.{ext}")  # step 2's inputs, 10-80 MB
     return (r if ok else None), res
 
 
@@ -296,6 +307,12 @@ def step1(r, a, dataset):
     return 0
 
 
+def pin_float16(a, res):
+    p = f"{a.name}.quantization.cfg"
+    text, res["float16_tensors"] = quant_report.pin_float16(open(p).read(), a.float16.split(","))
+    open(p, "w").write(text)
+
+
 def ranges(a, res, dataset):
     """Without NAME.quantization.cfg from the build (an --hybrid build is made by build()), calibrate again
     through step 1 in its own instance; without auto_hybrid its scales equal the build's (v9-t normal, 2026-11-27:
@@ -312,6 +329,10 @@ def ranges(a, res, dataset):
     for ext in ("model", "data"):
         if os.path.exists(f"{a.name}.{ext}"): os.remove(f"{a.name}.{ext}")  # step 2's inputs, 10-80 MB
     cfg = quant_report.parse_cfg(open(f"{a.name}.quantization.cfg").read())
+    # a pinned tensor's int8 parameters stay in the cfg but describe nothing the exported model runs, so the
+    # reports leave it out (a Concat over one counts as unmatched)
+    f16 = set(res.get("float16_tensors") or ())
+    cfg = {k: v for k, v in cfg.items() if k not in f16 and k.removesuffix("_int8") not in f16}
     names = output_names(a)
     outs = quant_report.qparams(cfg, names)
     for o in outs:

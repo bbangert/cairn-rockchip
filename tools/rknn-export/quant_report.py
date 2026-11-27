@@ -6,9 +6,10 @@
   saw; `NAME_int8` carries scale and zero point. (No YAML module in the toolkit's venv; the file's
   shape is fixed.)
 - `parse_error_analysis`: `accuracy_analysis`'s error_analysis.txt, one row per layer.
+- `pin_float16`: the cfg with the tensors some fnmatch patterns name pinned to float16 for step 2.
 usage: quant_report.py CFG [ONNX]   prints output qparams and the range flags
 """
-import json, re, sys
+import fnmatch, json, re, sys
 
 import numpy as np
 
@@ -48,6 +49,24 @@ def parse_cfg(text):
             out[name][key] = [] if val in ("", "[]") else ([_scalar(x) for x in val[1:-1].split(",")] if val.startswith("[")
                                                           else _scalar(val))
     return out
+
+
+EMPTY_CUSTOM = "custom_quantize_layers: {}\n"
+
+
+def pin_float16(text, patterns):
+    """-> (cfg text with custom_quantize_layers mapping every tensor a pattern matches to float16, matched
+    names sorted). A pattern matching nothing raises: a build without its pins would pass for the measurement."""
+    names = list(parse_cfg(text))
+    hit = {p: fnmatch.filter(names, p) for p in patterns}
+    missing = [p for p in patterns if not hit[p]]
+    if missing or not patterns:
+        raise ValueError(f"--float16: no tensor of the cfg matches {missing or 'an empty pattern list'}")
+    if not text.startswith(EMPTY_CUSTOM):
+        raise ValueError("the cfg does not start with an empty custom_quantize_layers")
+    matched = sorted({n for v in hit.values() for n in v})
+    # only the first line changes; the rest stays as step 1 wrote it
+    return "custom_quantize_layers:\n" + "".join(f"    {n}: float16\n" for n in matched) + text[len(EMPTY_CUSTOM):], matched
 
 
 def _one(v):
@@ -93,7 +112,8 @@ def _range(cfg, n):
 def narrow_concat(cfg, concats, fraction=CONCAT_FRACTION):
     """concats: [(input names, output name)]. Activations are per-tensor, so a Concat's inputs share its
     output's scale: an input using a small part of that range keeps few of the 256 levels.
-    -> (flagged, concats whose tensors the toolkit renamed or fused away, so they could not be checked)."""
+    -> (flagged, concats with a tensor not in cfg — renamed or fused away by the toolkit, or left out as float16 —
+    so they could not be checked)."""
     flagged, unmatched = [], 0
     for ins, out in concats:
         r_out = _range(cfg, out)

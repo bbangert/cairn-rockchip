@@ -157,3 +157,34 @@ def test_a_line_inside_the_table_that_is_not_a_row_is_an_error():
 def test_a_negative_cosine_row_is_kept():
     rows = q.parse_error_analysis("[Conv] /net/a -0.99000 | 34.98 0.99900 | 34.98\n[Conv] /net/b 0.5 | 1.0 -0.25 | 2.0")
     assert [(r["entire_cos"], r["single_cos"]) for r in rows] == [(-0.99, 0.999), (0.5, -0.25)]
+
+
+def test_pin_float16_maps_the_matched_tensors_and_leaves_the_rest_of_the_cfg_alone():
+    text, matched = q.pin_float16(CFG, ["/a/*", "box0"])
+    assert matched == ["/a/out", "/a/x", "/a/y", "box0"]  # * crosses /; box0_int8 is not box0
+    head, rest = text.split("quantize_parameters:", 1)
+    assert head == "custom_quantize_layers:\n" + "".join(f"    {n}: float16\n" for n in matched)
+    assert "quantize_parameters:" + rest == CFG[len(q.EMPTY_CUSTOM):]
+    assert q.parse_cfg(text) == q.parse_cfg(CFG)
+
+
+def test_pin_float16_refuses_a_pattern_that_matches_nothing():
+    with pytest.raises(ValueError, match=r"/a/z\*"):
+        q.pin_float16(CFG, ["/a/x", "/a/z*"])
+    with pytest.raises(ValueError, match="empty"):
+        q.pin_float16(CFG, [])
+    with pytest.raises(ValueError, match="custom_quantize_layers"):
+        q.pin_float16(q.pin_float16(CFG, ["/a/x"])[0], ["/a/y"])
+
+
+def test_float16_is_int8_only_and_not_with_hybrid():
+    import types
+    import convert
+
+    args = lambda **k: types.SimpleNamespace(**{**dict(onnx=None, calib="c", parity=None, out=None, mode="i8",
+                                                       hybrid=False, ranges=False, float16="/a/*"), **k})
+    convert.check_args(args())
+    with pytest.raises(SystemExit, match="exclude each other"):
+        convert.check_args(args(hybrid=True))
+    with pytest.raises(SystemExit, match="INT8 options"):
+        convert.check_args(args(mode="fp16"))

@@ -115,7 +115,7 @@ def test_parity_may_share_a_source_with_calibration_frames_the_count_leaves_out(
 
     calib, held = write("calib", ["a_00.png", "b_00.png"]), write("held", ["b_01.png"])
     args = lambda n: types.SimpleNamespace(onnx=None, calib=calib, parity=held, out=None, mode="i8", hybrid=False,
-                                           ranges=False, kind="mit", calib_count=n)
+                                           ranges=False, float16=None, kind="mit", calib_count=n)
     convert.check_args(args(1))
     for n in (2, None):
         with pytest.raises(SystemExit, match="share sources"):
