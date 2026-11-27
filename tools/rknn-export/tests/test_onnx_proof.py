@@ -180,3 +180,24 @@ def test_baseline_must_record_the_same_checkpoint_and_commit():
             op.check_baseline(baseline(**{**SIDECAR, field: value}), run)
     with pytest.raises(ValueError, match="mit_commit"):  # a baseline written before it was recorded
         op.check_baseline(baseline(checkpoint_sha256="ck"), run)
+
+
+def raw(**over):
+    out = {n: np.zeros((1, 2, 2, 2), np.float32) for i in range(3) for n in (f"box{i}", f"cls{i}")}
+    return {**out, **over}
+
+
+def test_scoring_outputs_are_ordered_and_squash_only_logit_classes():
+    out = raw(cls1=np.full((1, 2, 2, 2), 2.0, np.float32))
+    assert op.scoring_outputs(out, False)[3] is out["cls1"]
+    got = op.scoring_outputs(out, True)
+    assert got[2] is out["box1"] and np.allclose(got[3], 1 / (1 + np.exp(-2.0)))
+
+
+@pytest.mark.parametrize("value", [NAN, np.inf, -np.inf])
+@pytest.mark.parametrize("logits", [False, True])
+def test_scoring_refuses_non_finite_raw_outputs_naming_the_tensors(value, logits):
+    bad = np.zeros((1, 2, 2, 2), np.float32)
+    bad[0, 1, 0, 1] = value
+    with pytest.raises(op.NonFinite, match="box0, cls2"):
+        op.scoring_outputs(raw(box0=bad, cls2=bad), logits)

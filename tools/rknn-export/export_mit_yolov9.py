@@ -195,6 +195,15 @@ def main(argv=None):
         undo()
 
 
+def forget(out):
+    # the sidecar is the resume marker: it goes before the ONNX changes, so a failed or interrupted re-export
+    # is retried instead of leaving a marker for a file that is gone
+    try:
+        os.remove(out + ".json")
+    except FileNotFoundError:
+        pass
+
+
 def _export(a, with_sum, w, h):
     import mit_model, sources
     import torch
@@ -219,6 +228,7 @@ def _export(a, with_sum, w, h):
 
     names = [n for n, _ in expected_outputs((w, h), a.logits, with_sum)]
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    forget(a.out)
     with torch.no_grad():
         torch.onnx.export(Split().eval(), torch.zeros(1, 3, h, w), a.out, input_names=["images"],
                           output_names=names, opset_version=OPSET, do_constant_folding=True)

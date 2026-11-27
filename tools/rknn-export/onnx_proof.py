@@ -6,7 +6,7 @@ from FILE.onnx.json) on K images; a --logits model then gets its sigmoid on the 
 --baseline FILE.json (a baseline_mit.py result for the same name, mode, resample, size and limit)
 fails the run when the AP differs by more than --ap-tol; it must also record this export's checkpoint
 hash and MIT commit. --is-current exits 0 when the model still matches its sidecar and the pinned
-checkpoint, and its result exists with the same onnx_sha256, passes the AP gate and (given --compare K)
+checkpoint and commit, and its result exists with the same onnx_sha256, passes the AP gate and (given --compare K)
 holds a passing tensor comparison over at least K images; 1 when it must be (re)run, 2 on a refusal
 (a model that does not match its sidecar included) or a gate failure; --print-stem prints the result's basename.
 Run with the MIT venv, e.g. work/mit/venv/bin/python -B -I.
@@ -126,6 +126,20 @@ def ap_failure(ap, base_ap, tol):
     if not abs(ap - base_ap) <= tol + 1e-9:
         return f"AP {ap} differs from the baseline AP {base_ap} by {ap - base_ap:+.4g}, above {tol}"
     return None
+
+
+class NonFinite(ValueError):
+    pass
+
+
+def scoring_outputs(out, logits):
+    """The six decode inputs. Raw values are checked first: decode drops a NaN score and the host sigmoid turns
+    an infinite logit into a probability, so the AP gate alone would pass them."""
+    names = [n for i in range(3) for n in (f"box{i}", f"cls{i}")]
+    bad = [n for n in names if not np.isfinite(out[n]).all()]
+    if bad:
+        raise NonFinite(f"non-finite values in {', '.join(bad)}")
+    return [sigmoid(out[n]) if logits and n.startswith("cls") else out[n] for n in names]
 
 
 def positive_int(text):
@@ -256,14 +270,13 @@ def _run(a, meta, size, stem, base):
         if bad:
             sys.exit("tensor gate failed: " + "; ".join(bad.values()))
 
-    def infer(canvas):
-        out = raw_outputs(sess, canvas)
-        return [sigmoid(out[n]) if meta["logits"] and n.startswith("cls") else out[n]
-                for i in range(3) for n in (f"box{i}", f"cls{i}")]
-
     os.makedirs(a.out_dir, exist_ok=True)
-    t = coco_run.run(infer, os.path.join(COCO, "val2017"), ANN, size, a.mode, a.resample, stem + ".npz",
-                     limit=a.limit, workers=a.workers)
+    try:
+        t = coco_run.run(lambda canvas: scoring_outputs(raw_outputs(sess, canvas), meta["logits"]),
+                         os.path.join(COCO, "val2017"), ANN, size, a.mode, a.resample, stem + ".npz",
+                         limit=a.limit, workers=a.workers)
+    except NonFinite as e:
+        sys.exit(f"scoring refused: {e}")
     res = score_coco.evaluate(ANN, score_coco.load_detections(stem + ".npz"))
     import onnxruntime
 

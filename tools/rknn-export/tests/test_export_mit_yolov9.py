@@ -188,3 +188,11 @@ def test_export_refuses_a_clone_that_is_not_the_pinned_one(monkeypatch, tmp_path
     with pytest.raises(SystemExit, match="not the pinned one: YOLO has local changes"):
         ex.main(["v9-t", "--out", str(tmp_path / "m.onnx")])
     assert not (tmp_path / "m.onnx").exists()
+
+
+def test_forget_drops_the_resume_marker_and_tolerates_none(tmp_path):
+    out = tmp_path / "m.onnx"
+    (tmp_path / "m.onnx.json").write_text("{}")
+    ex.forget(str(out))
+    assert not (tmp_path / "m.onnx.json").exists()
+    ex.forget(str(out))
