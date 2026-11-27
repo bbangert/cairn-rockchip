@@ -21,7 +21,8 @@ BASE = "http://images.cocodataset.org/train2017"  # the dataset's own host; no m
 
 def draw(image_ids, n, seed=SEED):
     ids = np.array(sorted(set(int(i) for i in image_ids)), np.int64)
-    if n > len(ids):
+    # a negative n would reach the slice below and take all but the last -n ids
+    if not 0 <= n <= len(ids):
         raise ValueError(f"asked for {n} images, the file has {len(ids)}")
     # sorted first: the draw must not depend on the order the annotation file lists images in
     return [int(i) for i in np.random.default_rng(seed).permutation(ids)[:n]]
@@ -31,8 +32,8 @@ def read_ids(path, n=None):
     ids = [int(t) for ln in open(path) if not ln.startswith("#") for t in ln.split()]
     if len(set(ids)) != len(ids):
         raise ValueError(f"{path}: duplicate ids")
-    if n is not None and n > len(ids):
-        raise ValueError(f"{path} lists {len(ids)} ids, fewer than {n}")
+    if n is not None and not 0 <= n <= len(ids):
+        raise ValueError(f"{path} lists {len(ids)} ids, asked for {n}")
     return ids if n is None else ids[:n]
 
 

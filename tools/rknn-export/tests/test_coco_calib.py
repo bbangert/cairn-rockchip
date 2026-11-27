@@ -58,3 +58,12 @@ def test_fetch_refuses_a_stray_png_beside_its_own_files(tmp_path):
     (d / "stray.png").write_bytes(b"x")
     with pytest.raises(SystemExit, match="new or empty"):
         coco_calib.main(["fetch", str(p), str(d)])
+
+
+def test_a_negative_count_is_refused_not_sliced(tmp_path):
+    with pytest.raises(ValueError):
+        coco_calib.draw([1, 2, 3], -1)
+    p = tmp_path / "ids.txt"
+    p.write_text("1 2 3\n")
+    with pytest.raises(ValueError):
+        coco_calib.read_ids(str(p), -1)

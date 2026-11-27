@@ -334,9 +334,10 @@ recording its hash; without one the manifest is refused.
   draw, `coco_calib.py select` redraws it from `instances_train2017.json`);
   `prep_calib.py SRC OUT 640 png rgb [--list coco_calib_ids.txt]` writes a
   set. `convert.py --calib-count N` calibrates on its first N frames.
-- `convert.py NAME ONNX i8 --std 255,255,255 --calib SET --calib-count 200
+- `convert.py NAME ONNX i8 --std 255,255,255 --calib CALIB_SET --calib-count 200
   --algo normal|mmse|kl_divergence [--hybrid] [--opt-level 0] --kind mit
-  --parity SET --refuse-cpu --ranges --analysis 3 --out DIR` leaves beside
+  --parity HELDOUT_SET --refuse-cpu --ranges --analysis 3 --out DIR` leaves
+  beside
   `NAME.rknn`: `NAME.json` (settings, hashes, op targets, warnings,
   float16 layers, each output's scale and zero point), `NAME.out` and
   `NAME.build.log`, `NAME.ranges.json` (clipped box tensors, score ceilings
