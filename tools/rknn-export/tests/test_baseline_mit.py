@@ -13,6 +13,12 @@ def test_snap_boundaries_and_ceiling():
     assert (got * 256 == np.round(got * 256)).all()
 
 
+def test_snap_keeps_the_float_just_under_a_half_step_down():
+    half = np.float32(1 / 512)
+    below = np.nextafter(half, np.float32(0))
+    assert bm.snap_scores(np.array([below, half])).tolist() == [0, 1 / 256]
+
+
 def test_snap_is_idempotent():
     p = np.random.default_rng(0).uniform(size=1000).astype(np.float32)
     once = bm.snap_scores(p)

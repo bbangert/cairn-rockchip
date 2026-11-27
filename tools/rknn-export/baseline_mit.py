@@ -27,8 +27,9 @@ def variant_stem(name, mode, resample, limit, size=(640, 640), snap=False):
 
 def snap_scores(p, steps=256):
     """What an 8-bit sigmoid output with scale 1/steps can hold: k / steps, k = 0..steps-1."""
-    # floor(x + 0.5), not np.round: p just under 1/(2 * steps) must go to 0 and a tie must go up
-    return np.clip(np.floor(p * steps + 0.5) / steps, 0, (steps - 1) / steps).astype(np.float32)
+    # floor(x + 0.5), not np.round: p just under 1/(2 * steps) must go to 0 and a tie must go up.
+    # In float64: a float32 sum would round the float just under a half step up to the tie.
+    return np.clip(np.floor(np.asarray(p, np.float64) * steps + 0.5) / steps, 0, (steps - 1) / steps).astype(np.float32)
 
 
 def max_finite_diff(ours, theirs, what):
