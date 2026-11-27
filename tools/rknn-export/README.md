@@ -233,7 +233,8 @@ The rows a fetch manifest would pin (toolkit 2.3.2, target `rk3566`,
   nothing fails the build. A pinned op's output is cast back to INT8 for
   an INT8 consumer, so a wide tensor's consumer must be pinned as well
   (v9-t: class_conv.1 alone left parity recall unchanged; with
-  class_conv.2 too it rose from 0.41 to 0.87). `NAME.json` records
+  class_conv.2 too it rose from 0.41 to 0.87, and COCO AP from 34.52 to
+  37.71). `NAME.json` records
   `float16_patterns` and `float16_tensors`, and `NAME.ranges.json` leaves
   the pinned tensors out.
   `auto_hybrid` chooses its own layers, so it is refused with `--hybrid`.
@@ -321,9 +322,13 @@ scripts are long, resumable and log to their directory's `run.log`, ending
   probability by at most 0.0026 over 60 calibration frames (box outputs
   unchanged). The toolkit fuses the Clip into its conv (`ConvClip`),
   leaving the SiLU its own `exSwish`: three more ops, all INT8 on the NPU
-  (v9-t normal, 200 frames: parity recall 0.824, person 0.933). The
+  (v9-t normal, 200 frames: parity recall 0.824, person 0.933, COCO AP
+  37.71; the clamped float ONNX scores 38.21 like the unclamped one). The
   torch module has no clamp, so `onnx_proof.py --compare` refuses a
-  clamped export; its proof is its float AP.
+  clamped export; its proof is its float AP. Over 40 coco frames v9-s has
+  the same channels (up to 218 against a median of 5–6) and K = 32 moves
+  its float classes by at most 0.0003; v9-m has none (at most 93,
+  median 15–17), and K = 32 moves its classes by 0.014, K = 64 by 2e-5.
 - `fuse_repconv.py v9-s` exits non-zero if a RepConv is left or any output
   moves more than 1e-3 × max(1, max |plain|) on six inputs.
 - `./onnx_proof.sh` runs the fusion check, six exports, the top-left
@@ -385,8 +390,57 @@ recording its hash; without one the manifest is refused.
   STEM.meta.json --out STEM.json`.
 - `./quant_matrix.sh` runs the v9-t matrix, each build analysed and scored,
   and writes `work/mit/quant/sim/summary.tsv`; detached, resumable, log
-  `work/mit/quant/matrix.log`. `LIMIT=N` scores the first N images; an mmse
-  build calibrates on `MMSE_N` frames (50), the others on 200.
+  `work/mit/quant/matrix.log`. `LIMIT=N` scores the first N images; the
+  baseline mmse builds calibrate on `MMSE_N` frames (50), the others on
+  200, and the P3-T5 mmse builds on 100.
+  `RUNG=v9-s` (or `v9-m` with `CLAMP_K`) runs that model's short round
+  instead: float, FP16, normal/200, and the clamped export at normal/200
+  and mmse/100.
+
+v9-t 640 on COCO val2017 (5,000 images) in the toolkit 2.3.2 simulator,
+2026-11-27. AP columns are the reference protocol, `core AP` is core's
+decode; recall is held-out parity (all classes / person). Calibration is
+the coco or home set at the frame count shown.
+
+| build | float16 ops | AP | AP50 | AP75 | core AP | recall / person |
+|---|---|---|---|---|---|---|
+| float ONNX | — | 38.21 | 53.11 | 41.08 | 36.35 | — |
+| FP16 | all | 38.22 | 53.13 | 41.05 | 36.35 | 0.997 / 1.000 |
+| normal, coco 200 | 0 | 34.52 | 49.20 | 36.90 | 32.94 | 0.415 / 0.700 |
+| mmse, coco 20 | 0 | 34.62 | 48.38 | 37.29 | 33.06 | 0.457 / 0.700 |
+| mmse, coco 50 | 0 | 34.61 | 48.37 | 37.21 | 33.08 | 0.455 / 0.708 |
+| mmse, coco 100 | 0 | 36.25 | 51.11 | 38.80 | 34.46 | 0.428 / 0.725 |
+| kl_divergence, coco 200 | 0 | 34.37 | 48.85 | 36.38 | 32.74 | 0.333 / 0.725 |
+| normal, home 200 | 0 | 35.58 | 50.52 | 38.26 | 33.91 | 0.395 / 0.700 |
+| mmse, home 50 | 0 | 36.33 | 51.16 | 39.00 | 34.50 | 0.819 / 0.958 |
+| kl_divergence, home 200 | 0 | 34.56 | 49.49 | 37.33 | 32.88 | 0.619 / 0.867 |
+| logits export, mmse coco 50 | 0 | 35.94 | 50.99 | 38.74 | 34.23 | 0.318 / 0.592 |
+| unfused export, mmse coco 50 | 0 | 34.54 | 48.39 | 37.18 | 33.03 | 0.446 / 0.708 |
+| `--opt-level 0`, mmse coco 50 | 0 | 34.61 | 48.37 | 37.21 | 33.08 | 0.455 / 0.708 |
+| `--hybrid`, mmse coco 50 | 312 of 404 | 38.10 | 52.93 | 40.90 | 36.24 | 0.894 / 0.975 |
+| `--float16` cls12hi, normal coco 200 | 6 | 37.54 | 52.56 | 40.33 | 35.69 | 0.845 / 0.958 |
+| `--float16` cls12, normal coco 200 | 9 | 37.71 | 52.61 | 40.55 | 35.86 | 0.866 / 0.958 |
+| `--float16` cls12, mmse coco 100 | 9 | 37.95 | 52.77 | 40.80 | 36.13 | 0.870 / 0.950 |
+| clamp32 float ONNX | — | 38.21 | 53.11 | 41.08 | 36.35 | — |
+| clamp32, normal coco 200 | 0 | 37.71 | 52.64 | 40.59 | 35.86 | 0.824 / 0.933 |
+| clamp32, mmse coco 100 | 0 | 37.90 | 52.76 | 40.78 | 36.05 | 0.889 / 0.950 |
+
+- Algorithm, calibration set and frame count move pure INT8 between 34.37
+  and 36.33 AP; none closes the gap to FP16.
+- `accuracy_analysis` ranks, after the class outputs themselves,
+  class_conv.1's SiLU outputs at strides 16 and 32 worst (normal coco 200:
+  single cosine 0.978 and 0.995). One or two channels per stride set their
+  range (`--class-clamp` above).
+- Every build placed every op on the NPU; the only CPU row is the input.
+- Home calibration under mmse or kl_divergence leaves cls2 able to
+  represent at most 0.50 (calibration saw 0.916); under normal it keeps
+  0.916.
+- The clamp at 32 costs no float AP and brings pure INT8 to 37.90, 0.32
+  below FP16, with no float16 op: within 0.05 AP of pinning nine
+  tensors to float16.
+- The `-core` results of the first 13 builds (FP16 through `--opt-level
+  0`) were decoded before #15's two-step unprojection. That differs only
+  at the fourth decimal of a box coordinate; not re-measured.
 - `./build_rungs.sh mit` builds the t/s/m rungs into `work/rungs` with
   `MIT_ALGO`, `MIT_CALIB`, `MIT_CALIB_COUNT`.
 
