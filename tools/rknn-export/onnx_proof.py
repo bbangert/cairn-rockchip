@@ -4,9 +4,11 @@
 --compare K first checks the graph against the PyTorch module it was exported from (flags read
 from FILE.onnx.json) on K images; a --logits model then gets its sigmoid on the host before decode.
 --baseline FILE.json (a baseline_mit.py result for the same name, mode, resample, size and limit)
-fails the run when the AP differs by more than --ap-tol. --is-current exits 0 when the result for
-this model already exists and its onnx_sha256 matches (and still passes the AP gate), 1 when it
-must be (re)run, 2 on a refusal or a gate failure; --print-stem prints the result's basename.
+fails the run when the AP differs by more than --ap-tol; it must also record this export's checkpoint
+hash and MIT commit. --is-current exits 0 when the model still matches its sidecar and the pinned
+checkpoint, and its result exists with the same onnx_sha256, passes the AP gate and (given --compare K)
+holds a passing tensor comparison over at least K images; 1 when it must be (re)run, 2 on a refusal
+(a model that does not match its sidecar included) or a gate failure; --print-stem prints the result's basename.
 Run with the MIT venv, e.g. work/mit/venv/bin/python -B -I.
 usage: onnx_proof.py {v9-t|v9-s|v9-m} FILE.onnx --mode origin --resample bilinear-cv2 [--limit N]
                      [--out-dir DIR] [--compare K] [--baseline FILE.json] [--ap-tol AP]
@@ -102,8 +104,9 @@ def result_size(size):
 
 
 def check_baseline(base, run):
-    """Refuses a baseline scored under other settings than this run: its AP would not be comparable."""
-    got = {k: base.get(k) for k in ("name", "mode", "resample", "size", "limit")}
+    """Refuses a baseline scored under other settings than this run: its AP would not be comparable. A field the
+    baseline lacks reads as null and so differs."""
+    got = {k: base.get(k) for k in ("name", "mode", "resample", "size", "limit", "checkpoint_sha256", "mit_commit")}
     got["snap_scores"] = base.get("snap_scores", False)  # absent in baselines written before the flag existed
     want = {**run, "snap_scores": False}
     bad = {k: (got[k], want[k]) for k in want if got[k] != want[k]}
@@ -131,15 +134,38 @@ def positive_int(text):
     return n
 
 
-def is_current(result_path, meta, base, tol):
-    """Exit code: 0 skip, 1 run, 2 the existing result fails the AP gate. The sidecar sha is enough: main
-    re-verifies the file against it, so a rebuilt model changes both."""
+def verify_model(model, name, meta):
+    """-> (checkpoint path, sha256, MIT commit); ValueError unless the file and the pinned checkpoint match the sidecar."""
+    weights, sha, commit = mit_model.checkpoint(name)
+    if meta["checkpoint_sha256"] != sha or sources.sha256_file(model) != meta["onnx_sha256"]:
+        raise ValueError(f"{model} does not match its .json record or the pinned checkpoint")
+    return weights, sha, commit
+
+
+def compared_images(res):
+    """Images behind a result's passing tensor comparison; 0 when none, and for a result written before the
+    count was recorded (bool `compared`)."""
+    n = res.get("compared")
+    try:
+        cmp = {k: (v["max_abs_diff"], v["max_abs_value"]) for k, v in res["compare"].items()}
+    except (KeyError, TypeError, AttributeError):
+        return 0
+    if isinstance(n, bool) or not isinstance(n, int) or not cmp or tensor_failures(cmp):
+        return 0
+    return n
+
+
+def is_current(result_path, meta, base, tol, compare=None):
+    """Exit code: 0 skip, 1 run, 2 the existing result fails the AP gate. The sidecar sha is enough here: main
+    verifies the file against the sidecar first, so a rebuilt model changes both."""
     try:
         with open(result_path) as f:
             res = json.load(f)
     except (OSError, ValueError):
         return 1
     if res.get("onnx_sha256") != meta["onnx_sha256"]:
+        return 1
+    if compare and compared_images(res) < compare:
         return 1
     why = base and ap_failure(res["AP"], base["AP"], tol)
     if why:
@@ -178,14 +204,20 @@ def main(argv=None):
 
     base = None
     if a.baseline:
-        run = {"name": a.name, "mode": a.mode, "resample": a.resample, "size": result_size(size), "limit": a.limit}
+        run = {"name": a.name, "mode": a.mode, "resample": a.resample, "size": result_size(size), "limit": a.limit,
+               "checkpoint_sha256": meta["checkpoint_sha256"], "mit_commit": meta["mit_commit"]}
         try:
             base = load_baseline(a.baseline, run)
         except ValueError as e:
             print(f"{a.baseline}: {e}", file=sys.stderr)
             sys.exit(2)
     if a.is_current:
-        sys.exit(is_current(stem + ".json", meta, base, a.ap_tol))
+        try:
+            verify_model(a.model, a.name, meta)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            sys.exit(2)
+        sys.exit(is_current(stem + ".json", meta, base, a.ap_tol, a.compare))
 
     undo = mit_model.block_network()
     try:
@@ -196,11 +228,9 @@ def main(argv=None):
 
 def _run(a, meta, size, stem, base):
     try:
-        weights, sha, commit = mit_model.checkpoint(a.name)
+        weights, sha, commit = verify_model(a.model, a.name, meta)
     except ValueError as e:
         sys.exit(str(e))
-    if meta["checkpoint_sha256"] != sha or sources.sha256_file(a.model) != meta["onnx_sha256"]:
-        sys.exit(f"{a.model} does not match its .json record or the pinned checkpoint")
 
     sess = session(a.model, a.threads)
     names = {o.name for o in sess.get_outputs()}
@@ -208,7 +238,7 @@ def _run(a, meta, size, stem, base):
     if not want <= names:
         sys.exit(f"outputs {sorted(names)} lack {sorted(want - names)}")
 
-    cmp = None
+    cmp, n_compared = None, 0
     if a.compare:
         import torch
 
@@ -216,7 +246,7 @@ def _run(a, meta, size, stem, base):
         net = mit_model.load(a.name, weights, mit_model.MIT_DIR, sigmoid=not meta["logits"], fuse=meta["fuse"])
         canvases = [coco_run.prepare(os.path.join(COCO, "val2017", im["file_name"]), size, a.mode, a.resample)[0]
                     for im in coco_run._images(ANN, a.compare)]
-        cmp = compare(net, sess, canvases, meta["logits"])
+        cmp, n_compared = compare(net, sess, canvases, meta["logits"]), len(canvases)
         print(f"pytorch vs onnxruntime over {len(canvases)} images, max |diff| (of max |value|) per output: "
               + " ".join(f"{k} {d:.3g} ({m:.3g})" for k, (d, m) in sorted(cmp.items())))
         bad = tensor_failures(cmp)
@@ -238,7 +268,7 @@ def _run(a, meta, size, stem, base):
                 "mode": a.mode, "resample": a.resample, "size": result_size(size),
                 "limit": a.limit, "onnxruntime": onnxruntime.__version__, "model": os.path.basename(a.model),
                 "onnx_sha256": meta["onnx_sha256"], "checkpoint_sha256": sha, "mit_commit": commit,
-                "compared": cmp is not None,
+                "compared": n_compared,
                 "compare": cmp and {k: {"max_abs_diff": d, "max_abs_value": m} for k, (d, m) in cmp.items()},
                 "seconds": {k: round(v, 2) for k, v in t.items() if k != "images"},
                 "images_per_second": round(t["images"] / t["wall"], 2)})

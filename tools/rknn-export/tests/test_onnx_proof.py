@@ -104,3 +104,74 @@ def test_positive_int_refuses_zero_and_negative():
     for bad in ("0", "-3"):
         with pytest.raises(argparse.ArgumentTypeError):
             op.positive_int(bad)
+
+
+def result(**k):
+    cmp = {"box0": {"max_abs_diff": 1e-4, "max_abs_value": 5.0}}
+    return {"onnx_sha256": "abc", "AP": 38.21, "compared": 20, "compare": cmp, **k}
+
+
+def current(tmp_path, res, compare=20, base=None):
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(res))
+    return op.is_current(str(path), {"onnx_sha256": "abc"}, base, 0.05, compare)
+
+
+def test_is_current_wants_a_passing_comparison_over_at_least_the_requested_images(tmp_path):
+    assert current(tmp_path, result()) == 0
+    assert current(tmp_path, result(), compare=10) == 0
+    assert current(tmp_path, result(), compare=21) == 1  # a shorter earlier comparison
+    assert current(tmp_path, result(compared=0, compare=None)) == 1  # scoring only
+    assert current(tmp_path, result(compared=0, compare=None), compare=None) == 0  # none requested
+    assert current(tmp_path, result(), base={"AP": 39.0}) == 2
+
+
+@pytest.mark.parametrize("res", [{"compared": True}, {"compared": False}, {"compared": None}, {"compared": "20"},
+                                 {"compared": 20, "compare": {"box0": {"max_abs_diff": NAN, "max_abs_value": 1.0}}},
+                                 {"compared": 20, "compare": {"box0": {"max_abs_diff": 1.0, "max_abs_value": 1.0}}},
+                                 {"compared": 20, "compare": {"box0": 1.0}}, {"compared": 20, "compare": {}},
+                                 {"compared": 20, "compare": None}])
+def test_is_current_treats_old_or_malformed_comparison_records_as_not_current(tmp_path, res):
+    assert current(tmp_path, result(**res)) == 1
+
+
+def test_verify_model_refuses_corrupt_bytes_and_other_checkpoints(tmp_path, monkeypatch):
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"bytes")
+    meta = {"onnx_sha256": op.sources.sha256_file(str(model)), "checkpoint_sha256": "ck"}
+    monkeypatch.setattr(op.mit_model, "checkpoint", lambda name: ("w.pt", "ck", "commit"))
+    assert op.verify_model(str(model), "v9-t", meta) == ("w.pt", "ck", "commit")
+    model.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="does not match"):
+        op.verify_model(str(model), "v9-t", meta)
+    model.write_bytes(b"bytes")
+    with pytest.raises(ValueError, match="does not match"):
+        op.verify_model(str(model), "v9-t", {**meta, "checkpoint_sha256": "other"})
+
+
+def test_is_current_exits_2_for_a_model_that_differs_from_its_sidecar(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"corrupt")
+    meta = {"name": "v9-t", "onnx_sha256": "0" * 64, "checkpoint_sha256": "ck", "fuse": False, "logits": False,
+            "size": [640, 640]}
+    (tmp_path / "m.onnx.json").write_text(json.dumps(meta))
+    (tmp_path / "v9-t-onnx-origin-bilinear-cv2.json").write_text(json.dumps(result(onnx_sha256="0" * 64)))
+    monkeypatch.setattr(op.mit_model, "checkpoint", lambda name: ("w.pt", "ck", "commit"))
+    with pytest.raises(SystemExit) as e:
+        op.main(["v9-t", str(model), "--mode", "origin", "--resample", "bilinear-cv2", "--compare", "20",
+                 "--out-dir", str(tmp_path), "--is-current"])
+    assert e.value.code == 2 and "does not match" in capsys.readouterr().err
+
+
+SIDECAR = {"checkpoint_sha256": "ck", "mit_commit": "abc"}
+
+
+def test_baseline_must_record_the_same_checkpoint_and_commit():
+    run = {**RUN, **SIDECAR}
+    op.check_baseline(baseline(**SIDECAR), run)
+    for field, value in (("checkpoint_sha256", "other"), ("mit_commit", "other"),
+                         ("checkpoint_sha256", None), ("mit_commit", None)):
+        with pytest.raises(ValueError, match=field):
+            op.check_baseline(baseline(**{**SIDECAR, field: value}), run)
+    with pytest.raises(ValueError, match="mit_commit"):  # a baseline written before it was recorded
+        op.check_baseline(baseline(checkpoint_sha256="ck"), run)

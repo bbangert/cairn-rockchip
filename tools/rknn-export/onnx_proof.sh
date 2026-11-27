@@ -3,9 +3,9 @@
 # export, float baselines (8-bit-snapped, and unsnapped as the AP reference), then onnxruntime vs PyTorch on
 # full COCO val2017, each result gated to within 0.05 AP of its PyTorch baseline. Every exported model has a
 # proof. Long: run it yourself. Resumable -- an export whose .onnx.json exists is skipped, a baseline whose .json
-# exists is skipped, a proof is skipped while its result carries the model's current onnx_sha256 (and still passes
-# the AP gate) -- and self-logging; the last line of run.log is DONE or FAILED <step> (FAILED signal after
-# INT/TERM/HUP; a SIGKILL leaves no final line).
+# exists is skipped, a proof is skipped while the model still matches its sidecar and its result carries the current
+# onnx_sha256, a passing comparison over at least --compare images and a passing AP gate -- and self-logging; the last
+# line of run.log is DONE or FAILED <step> (FAILED signal after INT/TERM/HUP; a SIGKILL leaves no final line).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 PY="$HERE/work/mit/venv/bin/python"
@@ -71,7 +71,8 @@ proof() { # name tag [size]
         log "FAILED onnx $name$tag (baseline stem)"
         exit 1
     }
-    # one invocation shape for the currency check and the run; --is-current: 0 skip, 1 run, else refused or gate failed
+    # one invocation shape for the currency check and the run (so --compare reaches both); --is-current: 0 skip,
+    # 1 run, else refused (model differs from its sidecar included) or gate failed
     set -- "$name" "$model" $common --compare 20 --out-dir "$OUT" --baseline "$BASE/$bstem.json"
     "$PY" -B -I "$HERE/onnx_proof.py" "$@" --is-current >>"$LOG" 2>&1
     case $? in

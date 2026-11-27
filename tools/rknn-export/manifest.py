@@ -9,8 +9,9 @@ simulator error, and an rknn_sha256 equal to the file's hash.
 The manifest is a public model repo's licence statement, so MIT is never read
 off a name (the GPL-3.0 YOLOv9 shares it): a twin is MIT only when
 BUILD_DIR/X.onnx.json, written by export_mit_yolov9.py, records the twin's own
-hash; an .rknn inherits licence and `source` from its twin. A yolov9* file
-without that provenance refuses. Otherwise yolox* is Apache-2.0, the rest AGPL-3.0."""
+hash and names the model, commit and checkpoint hash; an .rknn inherits licence
+and `source` from its twin. A yolov9* file without that provenance refuses.
+Otherwise yolox* is Apache-2.0, the rest AGPL-3.0."""
 import hashlib, json, os, sys
 
 d = os.path.abspath(sys.argv[1])
@@ -29,8 +30,13 @@ for f in files:
     except ValueError: sc = None
     if not isinstance(sc, dict) or sc.get("onnx_sha256") != hashes[f]:
         bad.append(f"{f}: sidecar {sp} does not record this file's sha256"); continue
+    # a hash alone would label the file MIT with nothing saying which checkpoint it came from
+    miss = [k for k, ok in (("name", sc.get("name") in ("v9-t", "v9-s", "v9-m")),
+                            ("mit_commit", isinstance(sc.get("mit_commit"), str) and sc["mit_commit"]),
+                            ("checkpoint_sha256", isinstance(sc.get("checkpoint_sha256"), str) and sc["checkpoint_sha256"])) if not ok]
+    if miss: bad.append(f"{f}: sidecar {sp} lacks a valid {', '.join(miss)}"); continue
     mit[f] = {"repo": "MultimediaTechLab/YOLO"} | {k: sc[o] for k, o in (
-        ("commit", "mit_commit"), ("checkpoint", "name"), ("checkpoint_sha256", "checkpoint_sha256")) if o in sc}
+        ("commit", "mit_commit"), ("checkpoint", "name"), ("checkpoint_sha256", "checkpoint_sha256"))}
 for f in files:
     row = {"file": f, "sha256": hashes[f], "bytes": os.path.getsize(os.path.join(d, f)),
            "role": "rknn" if f.endswith(".rknn") else "twin",
