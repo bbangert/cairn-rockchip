@@ -1,0 +1,8 @@
+# The tooling the sdist-only antlr4-python3-runtime is built with (--no-build-isolation), installed
+# before requirements-mit.txt so the build never depends on whatever is current. Same platform lock.
+pip==23.0.1 \
+    --hash=sha256:236bcb61156d76c4b8a05821b988c7b8c35bf0da28a4b614e8d6ab5212c25c6f
+setuptools==66.1.1 \
+    --hash=sha256:6f590d76b713d5de4e49fe4fbca24474469f53c83632d5d0fd056f7ff7e8112b
+wheel==0.45.1 \
+    --hash=sha256:708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248

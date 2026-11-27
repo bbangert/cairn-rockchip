@@ -1,5 +1,5 @@
-work/
-venv/
+/work
+/venv
 __pycache__/
 .pytest_cache/
 # Ultralytics exports are AGPL and weights are not ours to redistribute.
