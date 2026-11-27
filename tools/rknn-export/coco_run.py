@@ -111,7 +111,9 @@ def run(infer, images_dir, ann_path, size, mode, resample, out_npz, limit=None,
             out = infer(canvas)
             t2 = time.perf_counter()
             t_prep, t_infer = t_prep + t1 - t0, t_infer + t2 - t1
-            job = (im["id"], p, size, [np.asarray(a, np.float32) for a in out])
+            # a copy: the pool pickles a job on its feeder thread, after a runtime that reuses its
+            # output buffers may already have written the next image into them
+            job = (im["id"], p, size, [np.array(a, np.float32) for a in out])
             if pool is None:
                 collect(_post(job))
             else:

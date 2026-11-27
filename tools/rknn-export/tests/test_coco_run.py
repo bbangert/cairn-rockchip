@@ -202,3 +202,14 @@ def test_non_square_size_through_prepare_and_run(tmp_path):
     # scales 192x64 by 0.5 with no padding, so original px are twice that,
     # with y2 clipped to the 64 px image height
     assert d.box[0] == pytest.approx((56, 24, 120, 64), abs=1e-3)
+
+
+def test_jobs_do_not_alias_the_tensors_infer_returned(ann, tmp_path, monkeypatch):
+    reused = tensors(hit=True)
+    jobs = []
+    post = coco_run._post
+    monkeypatch.setattr(coco_run, "_post", lambda job: jobs.append(job) or post(job))
+    coco_run.run(lambda c: reused, "/imgs", ann, SIZE, "centre", "bilinear-cv2", str(tmp_path / "o.npz"), workers=1,
+                 prepare=fake_prepare())
+    assert len(jobs) == len(SRC)
+    assert not any(np.shares_memory(a, r) for job in jobs for a, r in zip(job[3], reused))
