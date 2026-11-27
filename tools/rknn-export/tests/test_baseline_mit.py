@@ -35,3 +35,18 @@ def test_limit_below_one_is_rejected(limit, capsys):
 def test_print_stem_matches_variant_stem(capsys):
     assert bm.main(["v9-t", "--mode", "centre", "--resample", "lanczos-pil", "--print-stem"]) is None
     assert capsys.readouterr().out == bm.variant_stem("v9-t", "centre", "lanczos-pil", None) + "\n"
+
+
+def test_max_finite_diff_returns_the_max():
+    assert bm.max_finite_diff(np.array([1.0, 5.0]), np.array([1.5, 2.0]), "box") == 3.0
+
+
+@pytest.mark.parametrize("ours,theirs", [
+    ([1.0, np.nan], [1.0, 1.0]),
+    ([1.0, 1.0], [np.nan, 1.0]),
+    ([np.inf, 1.0], [np.inf, 1.0]),
+    ([-np.inf, 1.0], [np.inf, 1.0]),
+])
+def test_max_finite_diff_rejects_non_finite_values(ours, theirs):
+    with pytest.raises(ValueError, match="non-finite score"):
+        bm.max_finite_diff(np.array(ours), np.array(theirs), "score")

@@ -1,6 +1,7 @@
 import hashlib
 import os
 import socket
+import sys
 
 import pytest
 
@@ -131,3 +132,59 @@ def test_fit_class_neck_leaves_matching_width_and_other_keys_alone():
     ckpt = {"1.heads.0.class_conv.0.conv.weight": torch.zeros(128, 4, 3, 3)}
     assert mit_model._fit_class_neck(net, ckpt) == {} and head.class_conv is before
     assert mit_model._fit_class_neck(net, {}) == {} and head.class_conv is before
+
+
+def _git(*args, cwd):
+    import subprocess
+
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=cwd,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def pinned(tmp_path, monkeypatch):
+    clone = tmp_path / "YOLO"
+    clone.mkdir()
+    _git("init", "-q", cwd=clone)
+    (clone / "f").write_text("x")
+    _git("add", "f", cwd=clone)
+    _git("commit", "-q", "-m", "c", cwd=clone)
+    lock = {"mit": {"commit": _git("rev-parse", "HEAD", cwd=clone)}}
+    monkeypatch.setattr(mit_model, "MIT_DIR", str(clone))
+    monkeypatch.setattr(mit_model.sources, "load_lock", lambda: lock)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    return clone
+
+
+def _refuses(clone, match):
+    with pytest.raises(SystemExit, match=match):
+        mit_model._build("v9-t", str(clone))
+    assert str(clone) not in sys.path  # refused before the upstream import path is set up
+
+
+def test_build_refuses_a_dirty_pinned_clone(pinned):
+    (pinned / "f").write_text("edited")
+    _refuses(pinned, "not the pinned one.*local changes")
+
+
+def test_build_refuses_a_pinned_clone_on_another_commit(pinned):
+    (pinned / "g").write_text("y")
+    _git("add", "g", cwd=pinned)
+    _git("commit", "-q", "-m", "d", cwd=pinned)
+    _refuses(pinned, "not the pinned one.*lock says")
+
+
+def test_build_refuses_a_pinned_clone_that_is_not_a_repo(pinned, tmp_path):
+    import shutil
+
+    shutil.rmtree(pinned / ".git")
+    _refuses(pinned, "not the pinned one")
+
+
+def test_build_does_not_check_other_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(mit_model.sources, "load_lock", lambda: pytest.fail("checked a non-pinned dir"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    try:
+        mit_model._build("v9-t", str(tmp_path))
+    except Exception:
+        pass  # past the check; whatever stops it after that is the upstream import or config

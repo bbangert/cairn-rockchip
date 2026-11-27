@@ -8,6 +8,7 @@ the functions so the module imports in venvs without it.
 """
 import os
 import socket
+import subprocess
 import sys
 
 import sources
@@ -61,7 +62,20 @@ def checkpoint(name):
     return path, sha, lock["commit"]
 
 
+def verify_clone():
+    try:
+        return sources.check_clone(sources.load_lock()["mit"], MIT_DIR)
+    except (sources.SourceError, subprocess.CalledProcessError, OSError) as e:
+        # SystemExit, not ValueError: fuse_repconv and onnx_proof only catch ValueError around
+        # checkpoint(), so a ValueError out of load() would be a traceback there
+        sys.exit(f"refusing to run MIT code from a clone that is not the pinned one: {e}")
+
+
 def _build(name, repo_dir):
+    # Results record the commit from sources.lock, so the code behind them must be that commit.
+    # Only the pinned clone is checked: unit tests pass fake dirs that are not git repos.
+    if os.path.abspath(repo_dir) == os.path.abspath(MIT_DIR):
+        verify_clone()
     from omegaconf import OmegaConf
 
     if repo_dir not in sys.path:

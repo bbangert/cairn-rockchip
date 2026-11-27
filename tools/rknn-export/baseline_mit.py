@@ -31,6 +31,13 @@ def snap_scores(p, steps=256):
     return np.clip(np.floor(p * steps + 0.5) / steps, 0, (steps - 1) / steps).astype(np.float32)
 
 
+def max_finite_diff(ours, theirs, what):
+    # max(x, nan) keeps x, so a NaN difference would pass any threshold; inf - inf is NaN too
+    if not (np.isfinite(ours).all() and np.isfinite(theirs).all()):
+        raise ValueError(f"non-finite {what} values, cannot compare")
+    return float(abs(ours - theirs).max())
+
+
 def check_mit_decode(net, canvases, size):
     """Max abs difference of (boxes px, class probabilities) between MIT's Vec2Box path and ours."""
     import torch
@@ -46,8 +53,8 @@ def check_mit_decode(net, canvases, size):
             ours = [t.numpy() for t in net(x)]
             cls_logits, _, mit_box = v2b(net.net(x)["Main"])
             box, score = decode(ours[0::2], ours[1::2], size)
-            db = max(db, float(abs(mit_box[0].numpy() - box).max()))
-            ds = max(ds, float(abs(torch.sigmoid(cls_logits[0]).numpy() - score).max()))
+            db = max(db, max_finite_diff(mit_box[0].numpy(), box, "box"))
+            ds = max(ds, max_finite_diff(torch.sigmoid(cls_logits[0]).numpy(), score, "score"))
     return db, ds
 
 
@@ -111,7 +118,10 @@ def _run(a):
         ann = coco_run._images(os.path.join(COCO, "annotations", "instances_val2017.json"), a.check_mit_decode)
         canvases = [coco_run.prepare(os.path.join(COCO, "val2017", im["file_name"]), size, a.mode, a.resample)[0]
                     for im in ann]
-        db, ds = check_mit_decode(net, canvases, size)
+        try:
+            db, ds = check_mit_decode(net, canvases, size)
+        except ValueError as e:
+            sys.exit(f"MIT decode check: {e}")
         print(f"MIT decode check over {len(canvases)} images: max |box| diff {db:.3g} px, max |score| diff {ds:.3g}")
         mit_check = {"images": len(canvases), "max_box_px": db, "max_score": ds}
         if db > 1e-2 or ds > 1e-4:
