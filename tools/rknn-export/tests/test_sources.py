@@ -33,7 +33,7 @@ def test_verify_file(tmp_path):
         sources.verify_file(p, 4, good)
 
 
-@pytest.mark.parametrize("name", ["../x", "/abs/x", "a/../../x", ".."])
+@pytest.mark.parametrize("name", ["../x", "/abs/x", "a/../../x", "..", "a/../x", "x/..", "/abs", "a\\b", "..\\x"])
 def test_safe_member_rejects_escapes(name, tmp_path):
     with pytest.raises(sources.SourceError):
         sources.safe_member(name, tmp_path)
@@ -180,6 +180,14 @@ def git(*args, cwd):
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
+REAL_FREEZE = sources.freeze
+
+
+def good_freeze():
+    want = {**sources.pins(sources.BUILD_REQ), **sources.pins(sources.MIT_REQ)}
+    return [f"{k}=={v}" for k, v in want.items() if k != "wheel"]  # a venv from before wheel was pinned
+
+
 @pytest.fixture
 def tree(roots, monkeypatch):
     """A complete, good work/ in tmp dirs, and the lock that describes it."""
@@ -194,6 +202,7 @@ def tree(roots, monkeypatch):
     (mit / "weights" / "w.pt").write_bytes(b"abc")
     (mit / "venv").mkdir()
     sources.write_stamp(str(mit / "venv" / sources.VENV_STAMP), sources.requirements_digest())
+    monkeypatch.setattr(sources, "freeze", lambda venv: good_freeze())
     (coco / "val2017").mkdir()
     (coco / "annotations").mkdir()
     for n in ("1.jpg", "2.jpg"):
@@ -400,3 +409,33 @@ def test_every_requirement_is_hash_pinned(path):
 
 def test_pins_reads_local_version_labels():
     assert sources.pins(sources.MIT_REQ)["torch"] == "2.4.1+cpu"
+
+
+def verify_output(capsys):
+    with pytest.raises(SystemExit, match="differ"):
+        run_main("verify")
+    return capsys.readouterr().out
+
+
+def test_verify_checks_what_is_installed_not_just_the_stamp(tree, roots, monkeypatch, capsys):
+    run_main("verify")
+    assert "venv: ok" in capsys.readouterr().out
+    frozen = good_freeze()
+    name = sources.norm(frozen[0].split("==")[0])
+    stamp = roots[0] / "venv" / sources.VENV_STAMP
+    before = stamp.read_text()
+
+    monkeypatch.setattr(sources, "freeze", lambda venv: [frozen[0] + "9"] + frozen[1:])
+    out = verify_output(capsys)
+    assert "venv: MISMATCH" in out and name in out
+
+    monkeypatch.setattr(sources, "freeze", lambda venv: frozen[1:])
+    out = verify_output(capsys)
+    assert "venv: MISMATCH" in out and name in out
+    assert stamp.read_text() == before
+
+
+def test_verify_fails_cleanly_when_the_stamped_venv_has_no_pip(tree, monkeypatch, capsys):
+    monkeypatch.setattr(sources, "freeze", REAL_FREEZE)  # the fixture's venv is an empty stamped directory
+    out = verify_output(capsys)
+    assert "venv: MISMATCH" in out and "cannot run" in out

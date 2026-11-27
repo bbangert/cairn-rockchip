@@ -9,7 +9,9 @@ The first COCO fetch records the hashes, and the per-file val2017 manifest, in t
 Nothing fetched here enters git; work/ and venv/ are ignored, as directories or symlinks.
 A tree counts as present only when a stamp written after a successful check says so: the
 venv's holds the sha256 of the requirements files, the COCO images' the manifest digest in
-the lock. `verify` re-hashes every fetched file and fails on anything absent unless --allow-absent.
+the lock. `verify` re-hashes every fetched file, compares the venv's pip freeze with the
+requirements (the stamp alone is only the fetch fast path), and fails on anything absent
+unless --allow-absent.
 usage: sources.py {mit|coco|verify [--allow-absent]|venv-stamp}
 """
 import hashlib, json, os, re, shutil, subprocess, sys, urllib.request, zipfile
@@ -58,12 +60,16 @@ def verify_file(path, nbytes, sha256):
 
 
 def safe_member(name, dest):
-    # zipfile.extract strips ".." and drive parts silently; refuse instead of landing somewhere unintended.
-    norm = os.path.normpath(name)
-    if os.path.isabs(name) or os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
+    # Checked on the raw name: zipfile.extract drops ".." components, so a/../x would be accepted
+    # here after normalising yet land at a/x. A backslash is refused too: it separates components
+    # on Windows but is a filename character on POSIX, and the two readings must not differ.
+    if "\\" in name or ".." in name.split("/") or os.path.isabs(name):
         raise SourceError(f"unsafe archive member {name!r}")
-    target = os.path.normpath(os.path.join(dest, norm))
-    if os.path.commonpath([os.path.abspath(dest), os.path.abspath(target)]) != os.path.abspath(dest):
+    target = os.path.normpath(os.path.join(dest, name))
+    # Resolved, not lexical: an existing symlink under dest (or at the member's own path) would
+    # carry the write elsewhere. dest itself may be a symlink (work/ is), hence realpath on both.
+    root = os.path.realpath(dest)
+    if os.path.commonpath([root, os.path.realpath(target)]) != root:
         raise SourceError(f"archive member {name!r} escapes {dest}")
     return target
 
@@ -190,6 +196,14 @@ def check_venv(venv):
     raise SourceError(f"{venv} {why}; rm -r it and rerun `sources.py mit`")
 
 
+def check_installed_venv(venv):
+    # The stamp only says an install finished once; verify also asks what is installed now.
+    check_venv(venv)
+    diff = venv_diff(venv)
+    if diff:
+        raise SourceError(f"{venv} no longer matches the requirements: {diff[:8]}")
+
+
 def sync_venv():
     venv = os.path.join(MIT, "venv")
     if os.path.isdir(venv):
@@ -206,14 +220,15 @@ def sync_venv():
 
 
 def freeze(venv):
-    out = subprocess.run([os.path.join(venv, "bin", "pip"), "freeze", "--all"], capture_output=True, text=True, check=True).stdout
+    pip = os.path.join(venv, "bin", "pip")
+    try:
+        out = subprocess.run([pip, "freeze", "--all"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise SourceError(f"{venv}: cannot run {pip} freeze ({e})")
     return out.splitlines()
 
 
-def cmd_venv_stamp(lock):
-    venv = os.path.join(MIT, "venv")
-    if not os.path.isdir(venv):
-        raise SourceError(f"{venv} does not exist")
+def venv_diff(venv):
     want = {**pins(BUILD_REQ), **pins(MIT_REQ)}
     got, odd = {}, []
     for line in freeze(venv):
@@ -223,7 +238,14 @@ def cmd_venv_stamp(lock):
         else:
             odd.append(line)
     # wheel only builds the sdist; a venv installed before it was pinned lacks it
-    diff = sorted(odd + [k for k in want.keys() | got.keys() if k != "wheel" and want.get(k) != got.get(k)])
+    return sorted(odd + [k for k in want.keys() | got.keys() if k != "wheel" and want.get(k) != got.get(k)])
+
+
+def cmd_venv_stamp(lock):
+    venv = os.path.join(MIT, "venv")
+    if not os.path.isdir(venv):
+        raise SourceError(f"{venv} does not exist")
+    diff = venv_diff(venv)
     if diff:
         raise SourceError(f"{venv} does not match the requirements, refusing to stamp it: {diff[:8]}")
     write_stamp(os.path.join(venv, VENV_STAMP), requirements_digest())
@@ -412,7 +434,7 @@ def cmd_verify(lock, allow_absent=False):
         path = os.path.join(MIT, "weights", c["name"])
         check(c["name"], path, file_check(path, c["bytes"], c["sha256"]))
     venv = os.path.join(MIT, "venv")
-    check("venv", venv, lambda: check_venv(venv))
+    check("venv", venv, lambda: check_installed_venv(venv))
     check("val2017", os.path.join(COCO, "val2017"), lambda: verify_images(coco))
     af = coco["annotations_file"]
     path = os.path.join(COCO, af["path"])
