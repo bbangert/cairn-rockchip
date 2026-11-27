@@ -213,3 +213,22 @@ def test_jobs_do_not_alias_the_tensors_infer_returned(ann, tmp_path, monkeypatch
                  prepare=fake_prepare())
     assert len(jobs) == len(SRC)
     assert not any(np.shares_memory(a, r) for job in jobs for a, r in zip(job[3], reused))
+
+
+def test_rule_sets_from_one_pass_and_an_explicit_image_list(ann, tmp_path):
+    images = [{"id": 30, "file_name": "a.jpg", "width": 128, "height": 64}]
+    outs = {r: str(tmp_path / f"{r}.npz") for r in ("reference", "core")}
+    calls = []
+    t = coco_run.run(lambda c: calls.append(1) or tensors(True), "/x", ann, SIZE, "origin", "bilinear-cv2", outs,
+                     workers=1, prepare=fake_prepare(), images=images)
+    assert t["images"] == 1 and len(calls) == 1
+    ref, core = (load_detections(outs[r]) for r in ("reference", "core"))
+    assert ref.images.tolist() == core.images.tolist() == [30]
+    assert ref.class_id.tolist() == core.class_id.tolist() == [7]
+    assert core.score.tolist() == pytest.approx([0.9])
+
+
+def test_unknown_rule_set_is_refused(ann, tmp_path):
+    with pytest.raises(ValueError, match="rules"):
+        coco_run.run(lambda c: tensors(True), "/x", ann, SIZE, "origin", "bilinear-cv2", {"rust": str(tmp_path / "x.npz")},
+                     workers=1, prepare=fake_prepare())

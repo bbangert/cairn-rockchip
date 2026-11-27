@@ -310,3 +310,101 @@ def test_decode_leaves_a_float64_input_unchanged():
     ds.decode(boxes, clss, 64)
     for b, want in zip(boxes, before):
         assert np.array_equal(b, want)
+
+
+# core rules: a 640 square input showing a 640x480 source at the origin, so rows 480.. are pad
+P = ds.placement(640, 480, 640, "origin")
+WIRE = 0.5e-4 * 640 * 2  # 4 dp normalised, then back to pixels: x0 and the width each round
+
+
+def core(box, s, **kw):
+    return ds.core_nms(np.asarray(box, np.float32).reshape(-1, 4), s, P, 640, **kw)
+
+
+def test_round_half_away_is_rusts_not_numpys():
+    assert ds.round_half_away([0.0005, 0.0015, -0.0005, 0.0025], 3).tolist() == [0.001, 0.002, -0.001, 0.003]
+    assert np.round(0.0025, 3) == 0.002  # what it replaces: half to even
+
+
+def test_core_takes_one_class_per_anchor_the_last_of_a_tie():
+    s = np.zeros((1, 80), np.float32)
+    s[0, [3, 7]] = 0.5
+    _, sc, c = core([[10, 10, 50, 50]], s)
+    assert c.tolist() == [7] and sc.tolist() == [0.5]
+    s[0, 9] = 0.4  # multi-label would add a second detection on the same anchor
+    assert core([[10, 10, 50, 50]], s)[2].tolist() == [7]
+
+
+def test_core_floor_is_inclusive():
+    s = np.zeros((2, 80), np.float32)
+    s[0, 1], s[1, 1] = 0.001, 0.0009
+    assert len(core([[0, 0, 10, 10], [100, 100, 110, 110]], s, floor=np.float32(0.001))[1]) == 1
+
+
+def test_core_suppresses_at_equal_iou():
+    box = [[0, 0, 10, 10], [0, 0, 10, 4.5]]  # IoU exactly 0.45
+    s = cands([(0, 1, 0.9), (1, 1, 0.8)], 2)
+    assert len(core(box, s)[1]) == 1
+    assert len(ds.nms(np.asarray(box, np.float32), s, iou=0.45)[1]) == 2  # the reference keeps it
+
+
+def test_core_drops_a_pad_ghost_before_it_can_suppress_a_real_box():
+    # the ghost lies wholly in the pad (y >= 480) and overlaps the real edge box by more than 0.45
+    box = [[100, 480, 200, 600], [100, 400, 200, 600]]
+    s = cands([(0, 0, 0.9), (1, 0, 0.8)], 2)
+    b, sc, _ = core(box, s)
+    assert sc.tolist() == [0.8]
+    assert b[0].tolist() == pytest.approx([100, 400, 200, 480], abs=WIRE)  # clamped to the content
+
+
+def test_core_cuts_to_max_cand_before_nms_and_max_det_after():
+    n = 40
+    box = [[15 * i, 0, 15 * i + 10, 10] for i in range(n)]  # disjoint and inside the frame: NMS keeps all
+    s = cands([(i, 0, 0.5 + i / 100) for i in range(n)], n)
+    assert len(core(box, s)[1]) == 32
+    _, sc, _ = core(box, s, max_cand=10)
+    assert sc.tolist() == pytest.approx([0.89 - i / 100 for i in range(10)])
+
+
+def test_core_ties_keep_anchor_order():
+    box = [[20 * i, 0, 20 * i + 10, 10] for i in range(5)]
+    s = cands([(i, 0, 0.5) for i in range(5)], 5)
+    b, _, _ = core(box, s, max_cand=3)
+    assert b[:, 0].tolist() == pytest.approx([0, 20, 40], abs=WIRE)
+
+
+def test_core_refuses_boxes_past_four_inputs():
+    s = cands([(0, 0, 0.9), (1, 0, 0.8)], 2)
+    assert core([[0, 0, 2561, 10], [0, 0, 2560, 10]], s)[1].tolist() == [0.8]
+
+
+def test_core_rounds_the_wire():
+    s = cands([(0, 0, 0.12345)], 1)
+    b, sc, _ = core([[10.00004, 20, 30, 40]], s)
+    assert sc.tolist() == [0.123]
+    # normalised 4 dp: x0 = 10.00004 / 640 -> 0.0156 -> 9.984 px
+    assert b[0, 0] == pytest.approx(0.0156 * 640)
+
+
+def test_detections_dispatches_and_refuses_unknown_rules():
+    s = cands([(0, 0, 0.9)], 1)
+    box = np.asarray([[10, 10, 50, 50]], np.float32)
+    ref = ds.detections(box, s, P, 640, "reference")
+    assert ref[0][0].tolist() == pytest.approx([10, 10, 50, 50])
+    assert ds.detections(box, s, P, 640, "core")[1].tolist() == [0.9]
+    with pytest.raises(ValueError, match="rules"):
+        ds.detections(box, s, P, 640, "rust")
+
+
+def test_core_reproduces_the_residual_in_heads_rs_nms_doc():
+    # heads.rs `nms` doc: 1920x1080 into a 416 input (content rows 0..234), two person boxes x 65..130;
+    # 0.9 at y 233..500 (one content row) suppresses 0.8 at y 150..500 (IoU 267 / 350 = 0.7629) and
+    # what reaches the wire is [0.1563, 0.9957, 0.1563, 0.0043]
+    p = ds.placement(1920, 1080, 416, "origin")
+    assert (p.new_w, p.new_h) == (416, 234)
+    s = cands([(0, 0, 0.9), (1, 0, 0.8)], 2)
+    b, sc, c = ds.core_nms(np.array([[65, 233, 130, 500], [65, 150, 130, 500]], np.float64), s, p, 416)
+    assert sc.tolist() == [0.9] and c.tolist() == [0]
+    x0, y0 = b[0, 0] / 1920, b[0, 1] / 1080
+    assert [round(x0, 4), round(y0, 4), round(b[0, 2] / 1920 - x0, 4), round(b[0, 3] / 1080 - y0, 4)] == \
+        [0.1563, 0.9957, 0.1563, 0.0043]  # 65 / 416 = 0.15625: half away from zero, where numpy says 0.1562
