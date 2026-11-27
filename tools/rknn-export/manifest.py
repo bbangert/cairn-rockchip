@@ -57,7 +57,7 @@ for f in files:
         elif f.startswith("yolov9"): bad.append(f"{f}: MIT sidecar for its twin {tw} missing"); continue
         row.update(twin=tw, toolkit=b["toolkit"], target=b["target_platform"], mode=b["mode"],
                    quantized_algorithm=b["quantized_algorithm"], calib_set_id=b["calib_set_id"],
-                   calib_policy=b["calib_policy"], source_sha256=b["source_sha256"])
+                   calib_policy=b["calib_policy"], calib_count=b.get("calib_count"), source_sha256=b["source_sha256"])
     rows.append(row)
 if bad: sys.exit("manifest not written:\n" + "\n".join(bad))
 open(os.path.join(d, "MANIFEST.sha256"), "w").write("".join(f"{h}  {f}\n" for f, h in hashes.items()))

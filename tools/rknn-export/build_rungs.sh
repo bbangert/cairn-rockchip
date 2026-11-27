@@ -1,16 +1,20 @@
 #!/bin/sh
-# build_rungs.sh {apache|pack|all}: held-out frames -> calibration/parity sets
+# build_rungs.sh {apache|pack|mit|all}: held-out frames -> calibration/parity sets
 # -> twins -> .rknn + parity -> MANIFEST, in work/rungs. Each step skips if
 # its output exists, so a failed run resumes. Log: work/final/build.log.
 # `apache` needs no Ultralytics environment; `pack` (AGPL models) needs core's
-# qdq-export export-venv and the .pt files in work/src/weights.
+# qdq-export export-venv and the .pt files in work/src/weights; `mit` (the
+# MIT YOLOv9 rungs) needs work/mit/venv (sources.py mit) and fetches the COCO
+# train2017 calibration images coco_calib_ids.txt names. Its settings are
+# MIT_ALGO, MIT_CALIB (coco|home) and MIT_CALIB_COUNT; the defaults are a
+# starting point, not a P3 result. A rung whose parity verdict fails stops it.
 # CAIRN_CORE_PATH names the core checkout that holds the clips, the
 # calibration frames, the capture and census scripts and both venvs.
 set -eu
 CORE=$(cd "${CAIRN_CORE_PATH:?set CAIRN_CORE_PATH to a core checkout}" && pwd)
 cd "$(dirname "$0")"
-sel=${1:?usage: build_rungs.sh apache|pack|all}
-case $sel in apache|pack|all) ;; *) echo "usage: build_rungs.sh apache|pack|all" >&2; exit 2 ;; esac
+sel=${1:?usage: build_rungs.sh apache|pack|mit|all}
+case $sel in apache|pack|mit|all) ;; *) echo "usage: build_rungs.sh apache|pack|mit|all" >&2; exit 2 ;; esac
 ROOT=$PWD W=work
 F=$W/final R=$W/rungs H=$W/final/heldout
 PY=venv/bin/python
@@ -74,6 +78,29 @@ case $sel in pack|all)
   for m in yolov8n yolov8s yolo11n yolo11s yolo26n yolo26s; do
     [ -f $R/${m}_split.onnx ] || (cd $W/src/weights && $EXPORT_PY -I $ROOT/export_ultralytics_rknn.py $m split 640 $ROOT/$R/${m}_split.onnx)
     conv ${m}_split_640_i8 ${m}_split.onnx st640_rgb split 255,255,255
+  done
+esac
+case $sel in mit|all)
+  MPY=$W/mit/venv/bin/python
+  MIT_ALGO=${MIT_ALGO:-normal} MIT_CALIB=${MIT_CALIB:-coco} MIT_CALIB_COUNT=${MIT_CALIB_COUNT:-200}
+  if [ ! -s $W/coco/train2017-calib/MANIFEST.sha256 ]; then
+    $PY -I coco_calib.py fetch coco_calib_ids.txt $W/coco/train2017-calib || die "coco calibration fetch failed"
+  fi
+  [ -f $F/calib/mit640_coco/set.json ] || $PY -I prep_calib.py $W/coco/train2017-calib $F/calib/mit640_coco 640 png rgb --list coco_calib_ids.txt
+  [ -f $F/calib/mit640_home/set.json ] || $PY -I prep_calib.py $CAL/calib $F/calib/mit640_home 640 png rgb
+  [ -f $F/parity/mit640/set.json ] || $PY -I prep_calib.py $H $F/parity/mit640 640 png rgb
+  for m in t s m; do
+    n=yolov9${m}_640
+    $MPY -B -I fuse_repconv.py v9-$m || die "fusion check v9-$m failed"
+    # the sidecar beside the export is what manifest.py reads the MIT licence from
+    [ -f $F/build/$n.onnx.json ] || $MPY -B -I export_mit_yolov9.py v9-$m --out $F/build/$n.onnx --fuse || die "export v9-$m failed"
+    if [ ! -f $R/$n.onnx ]; then cp $F/build/$n.onnx $R/$n.onnx.tmp; mv $R/$n.onnx.tmp $R/$n.onnx; fi
+    [ -f $R/${n}_i8.rknn ] && continue
+    $PY -I convert.py ${n}_i8 $R/$n.onnx i8 --std 255,255,255 --algo $MIT_ALGO --calib $F/calib/mit640_$MIT_CALIB \
+      --calib-count $MIT_CALIB_COUNT --parity $F/parity/mit640 --kind mit --refuse-cpu --ranges --analysis 3 \
+      --out $F/build > $F/build/${n}_i8.out 2>&1 || { tail -20 $F/build/${n}_i8.out; die "convert ${n}_i8 failed"; }
+    cp $F/build/${n}_i8.rknn $R/${n}_i8.rknn.tmp
+    mv $R/${n}_i8.rknn.tmp $R/${n}_i8.rknn
   done
 esac
 $PY -I manifest.py $R

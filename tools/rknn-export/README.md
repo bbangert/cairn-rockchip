@@ -81,11 +81,15 @@ Mean and std are folded into the `.rknn`, so the model takes raw uint8.
 | yolox | letterbox, pad 114, content at the origin | BGR | 0 / 1 |
 | yolov8, yolo11, yolo26 | stretch | RGB | 0 / 255 |
 | rfdetr (trial only) | stretch | RGB | ImageNet |
+| yolov9 (MIT) | letterbox, pad 114, content at the origin | RGB | 0 / 255 |
 
 `prep_calib.py` writes each set as NCHW uint8 `.npy` — the toolkit rejects
 NHWC `.npy`, and image files would hide the channel order — with a
 `set.json` recording every frame's source geometry and an id hashed over the
 frame bytes. That id is the calibration set id in the manifest.
+The YOLOv9 sets (policy `png`) are the scoring pipeline's own canvases as
+PNG at the input size; the toolkit reads a PNG as RGB (checked: a file
+written R=200, B=20 calibrated model channel 0 to 200).
 
 ## Calibration and held-out frames
 
@@ -208,8 +212,21 @@ The rows a fetch manifest would pin (toolkit 2.3.2, target `rk3566`,
   `load_rknn` accepts it.
 - Every build drops `check*_*.onnx` files (20–40 MB each) into the current
   directory. `convert.py` changes into its `--out` directory first.
-- `accuracy_analysis` (`--analysis N`) writes about 1 GB per model. The rung
-  build does not use it.
+- `accuracy_analysis` reads one frame per model input, so `--analysis N`
+  calls it N times; each call dumps ~0.75 GB of text tensors, which
+  `convert.py` parses and deletes. The yolox and split rung builds do not
+  use it.
+- Per-tensor ranges, scales and zero points are not reported by `build`.
+  `--ranges` gets them by building through
+  `hybrid_quantization_step1(proposal=False)` + `step2`, one calibration
+  whose cfg is the model's own. `--hybrid` exists only in `build`, so with
+  it step 1 runs as a second calibration pass beside the build (v9-t
+  normal, 2026-11-27: its output scales were the simulator's output steps
+  from `build`, and step 1 + 2 gave `build`'s parity counts exactly).
+- A `.rknn` hash does not identify a build: two builds from the same
+  inputs differed in 200-240 bytes that read as heap addresses (v9-t
+  normal and kl_divergence, 2026-11-27) with equal cfgs and parity.
+  `convert.graph_id`, the outputs on a fixed input, is the identity.
 - CPU fallback is never a warning. It shows only as `CPU` rows in the
   operator table the toolkit prints to stdout (`NAME.out`, not
   `NAME.build.log`), which is what `summarize.py` counts.
@@ -307,6 +324,28 @@ AP on full val2017 (5000 images), top-left letterbox, cv2 bilinear:
 `manifest.py` labels a YOLOv9 file MIT only through the exporter's sidecar
 recording its hash; without one the manifest is refused.
 
+**Quantization.** Run with `venv/bin/python -I -B` unless marked.
+
+- `coco_calib.py fetch coco_calib_ids.txt work/coco/train2017-calib`
+  downloads the 500 train2017 images the tracked id list names (seeded
+  draw, `coco_calib.py select` redraws it from `instances_train2017.json`);
+  `prep_calib.py SRC OUT 640 png rgb [--list coco_calib_ids.txt]` writes a
+  set. `convert.py --calib-count N` calibrates on its first N frames.
+- `convert.py NAME ONNX i8 --std 255,255,255 --calib SET --calib-count 200
+  --algo normal|mmse|kl_divergence [--hybrid] [--opt-level 0] --kind mit
+  --parity SET --refuse-cpu --ranges --analysis 3 --out DIR` leaves beside
+  `NAME.rknn`: `NAME.json` (settings, hashes, op targets, warnings,
+  float16 layers, each output's scale and zero point), `NAME.out` and
+  `NAME.build.log`, `NAME.ranges.json` (clipped box tensors, score ceilings
+  under 1.0, Concat inputs under a quarter of their output's range),
+  `NAME.analysis.json` (per-layer `entire` and `single` cosine, worst
+  ranked) and `NAME.parity.json`, whose verdict (`parity.MIT_BAR`) is the
+  fast check for a rebuild. With `--ranges` (not `--hybrid`) the build is
+  `hybrid_quantization_step1` + `step2`, so the cfg is the model's own and
+  calibration runs once (v9-t normal: same parity counts as `build`).
+- `./build_rungs.sh mit` builds the t/s/m rungs into `work/rungs` with
+  `MIT_ALGO`, `MIT_CALIB`, `MIT_CALIB_COUNT`.
+
 ## board/
 
 Probes that ran on the Green during bring-up, with the board's `python3` and
@@ -356,6 +395,7 @@ so a rung from `work/rungs` cannot be scored this way.
 edits and the letterbox size rule, the YOLOv9 decode, scoring, graph checks
 and source fetch, the pieces whose errors would be silent, and the
 manifest's refusals. `tests/requirements.txt` installs none of the toolkit,
-onnxruntime, torch, PIL or cv2, so under it the checks that need them (a
-resized model run, the RepConv fold and loader in torch, the resamplers)
-are skipped.
+onnxruntime, torch or PIL, so under it the checks that need them (a resized
+model run, the RepConv fold and loader in torch, the PIL resampler) are
+skipped; it does install headless OpenCV, at the toolkit venv's version, so
+the check that a calibration PNG is the scoring canvas runs.

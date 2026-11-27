@@ -215,3 +215,51 @@ def test_frame_stats_rejects_non_finite(bad):
     pair = ([x], [t]) if bad == "sim" else ([t], [x])
     with pytest.raises(ValueError, match="non-finite"):
         parity.frame_stats("yolox", *pair)
+
+
+def mit(levels_pos, with_sum=True, logits=False):
+    """MIT order (box, cls[, sum]) per stride; returns (names, tensors)."""
+    t = split(levels_pos)
+    names, out = [], []
+    for k in range(3):
+        box, cls, sm = t[3 * k:3 * k + 3]
+        if logits:
+            cls = np.log(cls / (1 - cls))
+        names += [f"box{k}", f"cls{k}"] + ([f"sum{k}"] if with_sum else [])
+        out += [box, cls] + ([sm] if with_sum else [])
+    return names, out
+
+
+def test_mit_kind_picks_tensors_by_name_with_or_without_sum():
+    pos = {0: [(2, 3, 0, 0.9, 4, 0)], 2: [(0, 1, 0, 0.7, 4, 0)]}
+    for with_sum in (True, False):
+        names, ref = mit(pos, with_sum)
+        _, sim = mit({0: [(2, 3, 0, 0.9, 4, 2)], 2: [(0, 1, 0, 0.2, 4, 0)]}, with_sum)
+        a = parity.Acc("mit", names)
+        a.add("g", sim, ref)
+        r = a.result()["g"]
+        assert r["score"]["n_ref"] == 2 and r["score"]["recall"] == approx(0.5)
+        assert r["strides"]["8"]["box_err_px"] == approx(2 * 8 / 4, abs=1e-4)
+
+
+def test_mit_logits_are_thresholded_as_probabilities():
+    names, ref = mit({1: [(1, 1, 0, 0.9, 4, 0)]}, False, logits=True)
+    a = parity.Acc("mit", names, logits=True)
+    a.add("g", ref, ref)
+    r = a.result()["g"]
+    assert r["score"]["n_ref"] == 1 and r["score"]["max_ref"] == approx(0.9)
+
+
+def test_mit_missing_output_is_named():
+    names, ref = mit({}, False)
+    with pytest.raises(ValueError, match="cls2"):
+        parity.frame_stats("mit", ref[:-1], ref[:-1], names[:-1])
+
+
+def test_mit_verdict_checks_each_bar():
+    good = {"score": {"recall": 0.95, "max_ref": 0.9, "max_sim": 0.88}, "person": {"recall": None}, "box_err_px": 0.3}
+    assert parity.mit_verdict(good)["pass"]
+    for bad in ({"score": dict(good["score"], recall=0.5)}, {"box_err_px": 3.0},
+                {"score": dict(good["score"], max_sim=0.7)}, {"person": {"recall": 0.5}}):
+        v = parity.mit_verdict({**good, **bad})
+        assert not v["pass"] and list(v["checks"].values()).count(False) == 1
