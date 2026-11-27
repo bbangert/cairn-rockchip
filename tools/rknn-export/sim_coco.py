@@ -13,7 +13,8 @@ rerun with the same arguments skips them. A resumed rknn run rebuilds the graph,
 unless the rebuild's outputs on a fixed input (convert.graph_id) equal the first build's: the
 .rknn hash differs between identical builds. STEM-core.meta.json, written last, is the done marker.
 For a logits export the -core result scores a decode core does not have (SplitDfl applies no
-sigmoid). Run with venv/bin/python -I -B.
+sigmoid). Of convert.py's options, --std defaults to 255,255,255 here (the float reference is fed
+0-1) and --size is refused. Run with venv/bin/python -I -B.
 usage: sim_coco.py [--limit N] [--out-dir DIR] [--chunk 250] [--workers 6] onnx ONNX
        sim_coco.py [--limit N] [--out-dir DIR] [--chunk 250] [--workers 6] rknn NAME ONNX {i8|fp16} [convert.py options]
        sim_coco.py ... --print-stem   prints the reference-rules stem and exits
@@ -54,8 +55,11 @@ def chunk_done(parts, k):
 
 def merge(parts, n_chunks, rule, out_npz):
     ds = [score_coco.load_detections(os.path.join(parts, f"{k}.{rule}.npz")) for k in range(n_chunks)]
-    score_coco.save_detections(out_npz, *(np.concatenate([getattr(d, f) for d in ds])
-                                          for f in ("image_id", "class_id", "score", "box", "images")))
+    # a finished run merges again on a rerun; a kill here must not truncate the result its done marker vouches for
+    tmp = out_npz[:-4] + ".tmp.npz"
+    score_coco.save_detections(tmp, *(np.concatenate([getattr(d, f) for d in ds])
+                                      for f in ("image_id", "class_id", "score", "box", "images")))
+    os.replace(tmp, out_npz)
 
 
 def write_json(path, obj):
@@ -71,7 +75,9 @@ def fingerprint(a):
     calib = getattr(a, "calib", None)
     if calib and os.path.exists(os.path.join(calib, "set.json")):
         frames = json.load(open(os.path.join(calib, "set.json")))["frames"]
-        keep["calib_set_id"] = prep_calib.subset_id(frames, a.calib_count)
+        n = len(frames) if a.calib_count is None else a.calib_count
+        files = open(os.path.join(calib, "dataset.txt")).read().split()
+        keep["calib_set_id"] = prep_calib.subset_id(convert.hashed(frames[:n], files))
     return {**keep, "source_sha256": sources.sha256_file(a.onnx)}
 
 
@@ -96,7 +102,10 @@ def build_quietly(a):
         ok = r is not None and rec["_step"]("sim_init", lambda: r.init_runtime())
         if ok: convert.post_steps(r, a, rec)
         rec = convert.save(a, rec)
-        ok = ok and rec["steps"].get("graph_unchanged") == "ok"
+        # a parity verdict that failed is a measurement and is scored; a step that did not run is not, and a
+        # done marker over it would keep the matrix from ever retrying the variant
+        ok = (ok and rec["steps"].get("graph_unchanged") == "ok" and all(v == "ok" for v in rec["steps"].values())
+              and not isinstance(rec.get("sim_outputs"), str))
     finally:
         sys.stdout.flush(); sys.stderr.flush()
         os.dup2(saved[0], 1); os.dup2(saved[1], 2)
@@ -119,8 +128,11 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="stage", required=True)
     so = sub.add_parser("onnx")
     so.add_argument("onnx")
-    sub.add_parser("rknn", parents=[convert.parser(add_help=False)])
+    # the float reference is fed 0-1 (onnx_proof); convert.py's own default of 1 would score a 0-255 model against it
+    sub.add_parser("rknn", parents=[convert.parser(add_help=False)]).set_defaults(std="255,255,255")
     a = ap.parse_args(argv)
+    if getattr(a, "size", None):
+        sys.exit("--size: images, decode and stem here follow the export's own size; export at the size to score")
     a.onnx = os.path.abspath(a.onnx)
     a.out_dir = os.path.abspath(a.out_dir)
     meta = onnx_meta(a.onnx)
@@ -171,11 +183,13 @@ def main(argv=None):
         tmp = {rule: os.path.join(parts, f"{k}.{rule}.tmp.npz") for rule in RULES}
         t = coco_run.run(infer, os.path.join(COCO, "val2017"), ANN, size, MODE, RESAMPLE, tmp,
                          workers=a.workers, images=all_chunks[k])
-        for rule in RULES:  # not `r`: that is the live graph the next chunk runs on
-            os.replace(tmp[rule], os.path.join(parts, f"{k}.{rule}.npz"))
+        # the record first: a kill between the two leaves a chunk that is rerun, never a kept chunk without its record
+        runs = [x for x in runs if x["chunk"] != k]
         runs.append({"chunk": k, "images": t["images"], "seconds": {key: round(v, 2) for key, v in t.items() if key != "images"},
                      "rknn_sha256": build_rec and build_rec.get("rknn_sha256")})
         write_json(runs_path, runs)
+        for rule in RULES:  # not `r`: that is the live graph the next chunk runs on
+            os.replace(tmp[rule], os.path.join(parts, f"{k}.{rule}.npz"))
         done = sum(x["images"] for x in runs)
         print(f"{time.strftime('%H:%M:%S')} chunk {k}: {done}/{len(images)} images, "
               f"{t['images'] / t['wall']:.2f} img/s", file=sys.stderr, flush=True)

@@ -94,7 +94,7 @@ def run(infer, images_dir, ann_path, size, mode, resample, out_npz, limit=None,
     if not images:
         raise ValueError("no images to run")
     size = _wh(size)
-    outs = {"reference": out_npz} if isinstance(out_npz, str) else dict(out_npz)
+    outs = {"reference": out_npz} if isinstance(out_npz, (str, os.PathLike)) else dict(out_npz)
     if not outs or set(outs) - set(RULES):
         raise ValueError(f"rules {sorted(outs)}: want some of {RULES}")
     rules = tuple(outs)

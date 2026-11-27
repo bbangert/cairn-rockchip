@@ -232,3 +232,10 @@ def test_unknown_rule_set_is_refused(ann, tmp_path):
     with pytest.raises(ValueError, match="rules"):
         coco_run.run(lambda c: tensors(True), "/x", ann, SIZE, "origin", "bilinear-cv2", {"rust": str(tmp_path / "x.npz")},
                      workers=1, prepare=fake_prepare())
+
+
+def test_a_path_object_is_one_output_not_a_rule_mapping(ann, tmp_path):
+    out = tmp_path / "o.npz"
+    coco_run.run(lambda c: tensors(True), "/x", ann, SIZE, "origin", "bilinear-cv2", out, workers=1,
+                 prepare=fake_prepare())
+    assert out.exists()

@@ -115,3 +115,49 @@ def test_a_resume_whose_model_answers_differently_is_refused(onnx_run):
     with pytest.raises(SystemExit, match="outputs differ"):
         sim_coco.main(argv)
     assert not sim_coco.chunk_done(str(stem) + ".parts", 1)
+
+
+def test_a_chunk_is_kept_only_once_its_run_record_is_written(onnx_run, monkeypatch):
+    argv, state, stem = onnx_run
+    real, calls = sim_coco.write_json, []
+
+    def write_json(path, obj):
+        if path.endswith("runs.json"):
+            calls.append(path)
+            if len(calls) == 2:
+                raise KeyboardInterrupt  # the process dies before chunk 1's record lands
+        return real(path, obj)
+
+    monkeypatch.setattr(sim_coco, "write_json", write_json)
+    with pytest.raises(KeyboardInterrupt):
+        sim_coco.main(argv)
+    parts = str(stem) + ".parts"
+    assert sim_coco.chunk_done(parts, 0) and not sim_coco.chunk_done(parts, 1)
+    sim_coco.main(argv)
+    assert sorted(x["chunk"] for x in json.load(open(parts + "/runs.json"))) == [0, 1, 2]
+
+
+def test_a_set_without_per_frame_hashes_is_fingerprinted_as_convert_records_it(tmp_path):
+    import argparse
+    import hashlib
+
+    d = tmp_path / "set"
+    d.mkdir()
+    (d / "000.png").write_bytes(b"a"); (d / "001.png").write_bytes(b"b")
+    (d / "set.json").write_text(json.dumps({"frames": [{"file": "000.png"}, {"file": "001.png"}]}))
+    (d / "dataset.txt").write_text(f"{d}/000.png\n{d}/001.png\n")
+    onnx = tmp_path / "m.onnx"
+    onnx.write_bytes(b"model")
+    fp = sim_coco.fingerprint(argparse.Namespace(onnx=str(onnx), calib=str(d), calib_count=1))
+    want = sim_coco.prep_calib.subset_id([{"file": "000.png", "sha256": hashlib.sha256(b"a").hexdigest()}])
+    assert fp["calib_set_id"] == want
+
+
+def test_rknn_mode_defaults_to_the_float_reference_scaling_and_refuses_a_size(onnx_run, capsys):
+    argv, _state, _stem = onnx_run
+    onnx = argv[-1]
+    assert sim_coco.main(["--print-stem", "rknn", "n", onnx, "i8", "--std", "1,1,1"]) is None
+    with pytest.raises(SystemExit, match="--size"):
+        sim_coco.main(["--print-stem", "rknn", "n", onnx, "i8", "--size", "32x32"])
+    ap = sim_coco.convert.parser(add_help=False)
+    assert ap.parse_args(["n", onnx, "i8"]).std == "1,1,1"  # convert.py's own default is unchanged
