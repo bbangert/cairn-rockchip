@@ -147,7 +147,7 @@ for p in sorted(glob.glob(os.path.join(s, "*.json"))):
         bd = json.load(open(bj)) if os.path.exists(bj) else {}
     f16 = bd.get("float16_layers", "")
     # max_score: the probability a cls output can reach, through the sigmoid for a logits export
-    ceil = min((o.get("max_score", o["max_representable"]) for o in bd.get("outputs", []) if o["name"].startswith("cls") and o.get("quantized")), default=None)
+    ceil = min((o.get("max_score", o["max_representable"]) for o in (bd.get("outputs") or []) if o["name"].startswith("cls") and o.get("quantized")), default=None)
     rows.append((name, r["AP"], r["AP50"], r["AP75"], r["n_images"], f16, "" if ceil is None else f"{ceil:.3f}"))
 print(f"{'result':<72} {'AP':>6} {'AP50':>6} {'AP75':>6} {'imgs':>5} {'f16':>4} {'clsmax':>6}")
 with open(os.path.join(s, "summary.tsv"), "w") as f:
